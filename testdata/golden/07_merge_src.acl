@@ -1,0 +1,7 @@
+v6-bootstrap off
+
+1.1.1.1 -> tcp *:80 accept
+2.2.2.2 -> tcp *:80 accept
+3.3.3.3 -> tcp *:80 accept
+
+drop

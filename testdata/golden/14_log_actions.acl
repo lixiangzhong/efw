@@ -1,0 +1,7 @@
+v6-bootstrap off
+
+1.1.1.1 -> tcp *:80 log
+2.2.2.2 -> tcp *:22 log accept
+3.3.3.3 -> tcp *:443 log reject
+
+drop

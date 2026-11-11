@@ -1,0 +1,12 @@
+v6-bootstrap off
+
+# * 源 + 协议前缀
+tcp * accept
+# * 源 + 协议后缀
+* udp log drop
+# * 源 + icmp 前缀
+icmp * reject
+# * 源 + 单独 log（匹配一切，只记录）
+* log
+# * 源 + accept：匹配一切，作为兜底（fallback accept）
+* accept

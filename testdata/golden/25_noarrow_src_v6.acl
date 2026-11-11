@@ -1,0 +1,31 @@
+v6-bootstrap off
+
+# 纯源地址（无 ->、无端口）
+2001:db8::1 accept
+2001:db8::2 drop
+2001:db8::3 reject
+
+# 协议前缀
+tcp 2001:db8::4 accept
+udp 2001:db8::5 accept
+icmp 2001:db8::6 accept
+
+# 协议后缀
+2001:db8::7 tcp drop
+2001:db8::8 udp drop
+2001:db8::9 icmp reject
+
+# CIDR 源
+2001:db8::/32 accept
+tcp 2001:db8:1::/48 drop
+udp 2001:db8:2::/48 reject
+
+# log 修饰
+2001:db8::10 log accept
+2001:db8::11 tcp log drop
+2001:db8::12 log reject
+
+# 单独 log（只记录不裁决）
+2001:db8::13 log
+
+drop

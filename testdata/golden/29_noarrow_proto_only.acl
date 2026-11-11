@@ -1,0 +1,16 @@
+v6-bootstrap off
+
+# 裸协议 token（无源、无端口）= 隐式 * 源
+accept{
+  tcp4
+  tcp6
+  udp4
+  udp6
+  icmp4
+  icmp6
+  tcp
+  udp
+  icmp
+}
+
+drop

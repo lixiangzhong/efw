@@ -1,0 +1,16 @@
+v6-bootstrap off
+
+accept{
+  tcp4 1.1.1.0/24 -> 22
+  tcp6 2001:db8::/32 -> 22
+  udp4 1.1.1.1 -> 53
+  udp6 2001:db8::1 -> 53
+  icmp4 1.1.1.2
+  icmp6 2001:db8::2
+  tcp4 80
+  tcp6 8443
+  tcp4 8080
+  tcp 1.1.1.3 -> 443
+}
+
+drop

@@ -1,0 +1,9 @@
+v6-bootstrap off
+
+accept{
+  80 443
+  8080 9090
+  tcp 3306
+}
+
+drop

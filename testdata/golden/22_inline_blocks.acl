@@ -1,0 +1,6 @@
+v6-bootstrap off
+
+accept { tcp 1.1.1.1 -> 80 }
+drop { 2.2.2.2 -> 22 }
+accept { 3.3.3.3 -> 8080 log }
+drop { * }

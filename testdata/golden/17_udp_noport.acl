@@ -1,0 +1,6 @@
+v6-bootstrap off
+
+1.1.1.1 -> udp *:* accept
+1.1.1.2 -> tcp *:* accept
+
+drop
