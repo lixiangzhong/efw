@@ -4,7 +4,7 @@
 
 - 默认纯离线编译；`efw apply` 可编译后直接原子应用到内核（重复执行即覆盖）。
 - 覆盖入站（`input`）与 Docker 发布端口（`forward`，仅 DNAT 转发流量）；`table inet` 双栈。
-- **只拦截外部来源**：私有地址/回环/链路本地/CGNAT/容器网段在编译器内自动放行，不需要指定网卡；容器互访、容器→宿主、内网/lo 都不受 ACL 拦截。
+- **只拦截外部来源**：默认仅放行 loopback/CGNAT/link-local 与 IPv6 ULA/link-local；**RFC1918 默认不放**。Docker 存在时 `apply` 自动探测并放行其网段。
 - 设计细节、错误码、验收标准见本地 SPEC.md（不纳入版本库），本文只讲怎么用。
 
 ## 安装 / 构建
@@ -225,7 +225,7 @@ cat rules.acl | efw apply      # stdin
 3. 探测 `table inet <table>`：
    - 已存在：同一 `nft` 批次内 `delete table` + 新定义（原子替换，失败时旧表不变）；
    - 不存在：直接创建。
-4. 成功后 stderr 输出一行 `efw: 已覆盖 / 已创建并应用 table inet efw`。
+4. 成功时静默（无状态输出，exit 0）；warning 与失败才写 stderr。
 
 约束与边界：
 
@@ -239,23 +239,25 @@ cat rules.acl | efw apply      # stdin
 
 ## 只拦截外部来源（无需指定网卡）
 
-efw 在 input/forward 两条链的**最前面**自动放行「机器内部来源」，再执行用户规则与兜底，因此不会拦截容器互访、容器→宿主、内网或 loopback：
+efw 在 input/forward 两条链的**最前面**自动放行「本机 / 非 RFC1918」来源：
 
 ```nft
-# auto: 内网/容器来源放行（只拦截外部来源）
-ip saddr { 10.0.0.0/8, 100.64.0.0/10, 127.0.0.0/8, 169.254.0.0/16, 172.16.0.0/12, 192.168.0.0/16 } accept
+ip  saddr { 100.64.0.0/10, 127.0.0.0/8, 169.254.0.0/16 } accept
 ip6 saddr { ::1, fc00::/7, fe80::/10 } accept
 ```
 
-- 覆盖：RFC1918、loopback、link-local、CGNAT（Kubernetes）、Docker 默认网段；IPv6 ULA/link-local/回环。
-- forward 侧这条放行**不带 `ct status dnat`**，所以容器之间、容器→宿主发布端口（hairpin）也不会被拦。
-- 不需要也不存在 `iface` 指令：不绑定网卡，多网卡/网卡改名都不影响。
-- 残余风险：如果外部报文伪造私有源地址，会被当作内网放行；本机当前 `rp_filter=0`，如网络环境允许可开启反向路径过滤（`sysctl -w net.ipv4.conf.all.rp_filter=1`）进一步收紧。
+- **RFC1918（`10.0.0.0/8`、`172.16.0.0/12`、`192.168.0.0/16`）默认不放行**。
+- Docker 存在时，`efw apply` 会执行 `docker network inspect`，把本机所有 Docker 网络的子网追加到上面两组集合（IPv4/IPv6）；没有 docker 命令则不加；docker 存在但 daemon 不可用会告警并继续。
+- `compile` 不做环境探测，保持确定性；只有 `apply` / shebang 执行时才会自动加 Docker 网段。
+- forward 侧放行**不带 `ct status dnat`**，所以 Docker 容器→宿主发布端口（hairpin）也能放行；容器之间的直连本来就不经过这两条规则。
+- 不需要 `iface` 指令：不绑定网卡，多网卡/网卡改名都不影响。
+- 如果机器没有 Docker 但需要内网访问（例如 DB 客户端连本机 MariaDB），要在 `/etc/fw.sh` 里显式写对应内网网段。
+- 残余风险：伪造来源仍可能被放行；`rp_filter=0` 时建议开启反向路径过滤（`sysctl -w net.ipv4.conf.all.rp_filter=1`）进一步收紧。
 
 ## Docker 发布端口（forward 链）
 
 Docker 的发布端口（`-p 8080:80`）走的是 **DNAT + FORWARD**，流量不会经过 INPUT。
-efw 默认同时生成两条链；内网/容器来源在两条链最前面已自动放行，只有外部来源会进入下列过滤：
+efw 默认同时生成两条链；Docker 网段由 `apply` 探测后在链首自动放行，其余外部来源进入下列过滤：
 
 | 链 | hook / priority | 匹配语义 |
 |:--|:--|:--|
