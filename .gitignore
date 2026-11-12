@@ -1,6 +1,7 @@
 # 构建产物
 /efw
 /efw.exe
+/dist/
 
 # macOS
 .DS_Store

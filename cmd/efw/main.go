@@ -20,7 +20,7 @@ import (
 )
 
 // version 是 --version 与产物头使用的版本号。
-const version = compiler.Version
+var version = compiler.Version
 
 // nftBinary 是 apply 模式调用的 nft 命令。
 const nftBinary = "nft"

@@ -12,7 +12,7 @@ import (
 )
 
 // Version 是产物头与 --version 使用的版本号。
-const Version = "1.0.0"
+var Version = "1.0.0"
 
 // Options 是编译与产物头所需的全部参数。
 type Options struct {

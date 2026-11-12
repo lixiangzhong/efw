@@ -1,0 +1,99 @@
+name: ci-release
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: gofmt
+        run: |
+          files="$(gofmt -l .)"
+          if [ -n "$files" ]; then
+            echo "需要 gofmt:"
+            echo "$files"
+            exit 1
+          fi
+      - name: vet
+        run: go vet ./...
+      - name: test
+        run: go test ./...
+
+  build:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: test
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { goos: linux,  goarch: amd64 }
+          - { goos: linux,  goarch: arm64 }
+          - { goos: darwin, goarch: amd64 }
+          - { goos: darwin, goarch: arm64 }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: build
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: "0"
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#v}"
+          name="efw_${version}_${GOOS}_${GOARCH}"
+          mkdir -p dist
+          go build -trimpath \
+            -ldflags "-s -w -X github.com/lixiangzhong/efw/internal/compiler.Version=${version}" \
+            -o "dist/${name}" ./cmd/efw
+          ( cd dist && sha256sum "${name}" > "checksums-${GOOS}-${GOARCH}.txt" )
+      - uses: actions/upload-artifact@v4
+        with:
+          name: efw-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: dist/
+          if-no-files-found: error
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: checksums
+        run: |
+          set -euo pipefail
+          cd dist
+          cat checksums-*.txt | sort -k2 > checksums.txt
+          rm -f checksums-*.txt
+          ls -l
+      - name: release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          if ! gh release create "${GITHUB_REF_NAME}" dist/* \
+              --title "${GITHUB_REF_NAME}" --generate-notes; then
+            gh release upload "${GITHUB_REF_NAME}" dist/* --clobber
+          fi
