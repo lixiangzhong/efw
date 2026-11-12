@@ -9,6 +9,24 @@
 
 ## 安装 / 构建
 
+Linux 一键安装（curl 或 wget 均可，默认装到 `/usr/local/bin/efw`）：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/lixiangzhong/efw/main/install.sh | sh
+# 或
+wget -qO- https://raw.githubusercontent.com/lixiangzhong/efw/main/install.sh | sh
+```
+
+```bash
+# 指定版本 / 安装目录
+curl -fsSL https://raw.githubusercontent.com/lixiangzhong/efw/main/install.sh | VERSION=v1.0.0 sh
+curl -fsSL https://raw.githubusercontent.com/lixiangzhong/efw/main/install.sh | BINDIR="$HOME/.local/bin" sh
+```
+
+脚本仅支持 Linux amd64/arm64，会校验 SHA256，安装完成后打印一份示例 ACL。
+
+从源码构建：
+
 ```bash
 go build -o efw ./cmd/efw
 ```
@@ -281,7 +299,7 @@ chain forward {
 `.github/workflows/ci-release.yml`：
 
 - push `main` / pull request：`gofmt`、`go vet`、`go test ./...`
-- push 标签 `vX.Y.Z`：测试通过后交叉编译 `linux/darwin × amd64/arm64`，生成
+- push 标签 `vX.Y.Z`：测试通过后编译 `linux × amd64/arm64`，生成
   `efw_<version>_<os>_<arch>` 与 `checksums.txt`，自动创建 GitHub Release
 - 手动 `workflow_dispatch`：只跑测试
 
