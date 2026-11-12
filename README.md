@@ -25,6 +25,27 @@ curl -fsSL https://raw.githubusercontent.com/lixiangzhong/efw/main/install.sh | 
 
 脚本仅支持 Linux amd64/arm64，会校验 SHA256，安装完成后打印一份示例 ACL。
 
+### 国内网络
+
+`install.sh` 的所有 GitHub 请求（最新版本探测、二进制、`checksums.txt`）都是**先直连、失败后自动改用镜像加速**，
+内置镜像前缀按顺序尝试：`https://gh-proxy.com` → `https://ghfast.top` → `https://ghproxy.net`
+→ `https://gh-proxy.org` → `https://github.cnxiaobai.com` → `https://gh.noki.eu.org`。
+
+个别镜像（如 `ghfast.top`）只代理下载、不代理 `api.github.com`；若最新版本探测失败，用 `VERSION=v1.1.0` 指定版本即可。
+
+如果连 `raw.githubusercontent.com` 都打不开，脚本本身也要先经镜像获取：
+
+```bash
+curl -fsSL https://gh-proxy.com/https://raw.githubusercontent.com/lixiangzhong/efw/main/install.sh | sh
+# 或经 jsDelivr（只镜像仓库文件，不代理 Release 资产）
+curl -fsSL https://cdn.jsdelivr.net/gh/lixiangzhong/efw@main/install.sh | sh
+```
+
+镜像前缀按「前缀 + 原始 GitHub URL」拼接，如需更换/增删，直接改脚本顶部的 `MIRRORS` 列表即可。
+
+> 注意：镜像同时提供二进制与 `checksums.txt`，SHA256 只能发现传输损坏，无法防镜像本身投毒。
+> 对第三方镜像不放心时请安装后与官方 Release 的校验和自行比对。
+
 从源码构建：
 
 ```bash
