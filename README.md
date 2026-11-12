@@ -276,6 +276,25 @@ chain forward {
 - 文件头 `forward off` 可关闭 forward 链，退回纯 input 行为。
 - 已知边界：host 网络模式的容器、rootless Docker（无 DNAT）、以及非 Docker 的 DNAT 端口转发也会落入 `ct status dnat` 的作用范围；容器之间的东西向流量不在其列。
 
+## 发布（GitHub Actions）
+
+`.github/workflows/ci-release.yml`：
+
+- push `main` / pull request：`gofmt`、`go vet`、`go test ./...`
+- push 标签 `vX.Y.Z`：测试通过后交叉编译 `linux/darwin × amd64/arm64`，生成
+  `efw_<version>_<os>_<arch>` 与 `checksums.txt`，自动创建 GitHub Release
+- 手动 `workflow_dispatch`：只跑测试
+
+发布一个版本：
+
+```bash
+git tag v1.2.3
+git push origin v1.2.3
+```
+
+版本号通过 ldflags 注入：`-X github.com/lixiangzhong/efw/internal/compiler.Version=<version>`；
+本地直接 `go build` 的默认版本是 `1.0.0`。
+
 ## 测试
 
 ```bash
