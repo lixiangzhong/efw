@@ -3,6 +3,7 @@ package emit
 
 import (
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -19,11 +20,13 @@ const (
 	// forwardChainName/forwardPriority：内置 Docker 转发链（仅匹配 DNAT 流量）。
 	forwardChainName = "forward"
 	forwardPriority  = "-10"
+)
 
-	// internal4Set/internal6Set：内置放行的“机器内部来源”，用于只拦截外部访问。
-	// 覆盖回环、RFC1918、链路本地、CGNAT 与 IPv6 ULA/链路本地/回环。
-	internal4Set = "{ 10.0.0.0/8, 100.64.0.0/10, 127.0.0.0/8, 169.254.0.0/16, 172.16.0.0/12, 192.168.0.0/16 }"
-	internal6Set = "{ ::1, fc00::/7, fe80::/10 }"
+// baseInternal4/baseInternal6 是默认放行的本机/非 RFC1918 来源。
+// RFC1918（10/8、172.16/12、192.168/16）默认不放行；Docker 网段由 apply 探测后追加。
+var (
+	baseInternal4 = []string{"100.64.0.0/10", "127.0.0.0/8", "169.254.0.0/16"}
+	baseInternal6 = []string{"::1", "fc00::/7", "fe80::/10"}
 )
 
 // Options 是产物头的元信息与部署参数。
@@ -37,8 +40,33 @@ type Options struct {
 	Source    string
 	Stamp     bool
 	Now       time.Time
+	// DockerNets 是 apply 时探测到的 Docker 网络子网，追加到内网来源放行集合。
+	DockerNets []string
 	// UnreachableLines 是 W1 告警涉及的行号，产物中会加 unreachable 注释。
 	UnreachableLines map[int]bool
+}
+
+// internalSourceSets 生成 input/forward 最前面的来源放行集合：
+// 默认含 CGNAT/loopback/link-local 与 IPv6 ULA/link-local/回环；
+// RFC1918 不默认放行，只有 Docker 探测到的子网会追加。
+func internalSourceSets(dockerNets []string) (string, string) {
+	v4 := append([]string(nil), baseInternal4...)
+	v6 := append([]string(nil), baseInternal6...)
+	seen := make(map[string]struct{}, len(dockerNets))
+	for _, net := range dockerNets {
+		if _, ok := seen[net]; ok {
+			continue
+		}
+		seen[net] = struct{}{}
+		if strings.Contains(net, ":") {
+			v6 = append(v6, net)
+		} else {
+			v4 = append(v4, net)
+		}
+	}
+	sort.Strings(v4)
+	sort.Strings(v6)
+	return "{ " + strings.Join(v4, ", ") + " }", "{ " + strings.Join(v6, ", ") + " }"
 }
 
 // Render 渲染完整可加载的 ruleset。同一输入与选项必须产出字节级相同结果。
@@ -79,9 +107,10 @@ func renderChain(b *strings.Builder, f *ir.File, plan optimize.Plan, opts Option
 	if forward {
 		fmt.Fprintf(b, "%s# 说明: 本链只匹配 DNAT 转发流量（如 Docker 发布端口）\n\n", indentChain)
 	}
-	fmt.Fprintf(b, "%s# auto: 内网/容器来源放行（只拦截外部来源）\n", indentChain)
-	fmt.Fprintf(b, "%sip saddr %s accept\n", indentChain, internal4Set)
-	fmt.Fprintf(b, "%sip6 saddr %s accept\n\n", indentChain, internal6Set)
+	internal4, internal6 := internalSourceSets(opts.DockerNets)
+	fmt.Fprintf(b, "%s# auto: 本机/CGNAT/link-local 来源放行（RFC1918 默认不放；Docker 网段按 apply 探测）\n", indentChain)
+	fmt.Fprintf(b, "%sip saddr %s accept\n", indentChain, internal4)
+	fmt.Fprintf(b, "%sip6 saddr %s accept\n\n", indentChain, internal6)
 	if f.Established {
 		fmt.Fprintf(b, "%s# auto: 已建立连接放行\n", indentChain)
 		fmt.Fprintf(b, "%sct state established,related accept\n\n", indentChain)

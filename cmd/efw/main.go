@@ -7,9 +7,11 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/netip"
 	"os"
 	"os/exec"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -250,21 +252,22 @@ func readSource(opts compileOptions, positional []string, stdin io.Reader) (stri
 }
 
 // buildCompiled 读取 DSL 并完成编译，告警写到 stderr。
-func buildCompiled(opts compileOptions, priority string, positional []string, stdin io.Reader, stderr io.Writer) (compileResult, error) {
+func buildCompiled(opts compileOptions, priority string, positional []string, stdin io.Reader, stderr io.Writer, dockerNets []string) (compileResult, error) {
 	source, src, err := readSource(opts, positional, stdin)
 	if err != nil {
 		return compileResult{}, err
 	}
 	ruleset, warns, compileErr := compiler.Compile(src, compiler.Options{
-		Table:     opts.table,
-		Chain:     opts.chain,
-		Hook:      strings.ToLower(opts.hook),
-		Priority:  priority,
-		LogPrefix: opts.logPrefix,
-		Version:   version,
-		Source:    source,
-		Stamp:     opts.stamp,
-		Now:       time.Now(),
+		Table:      opts.table,
+		Chain:      opts.chain,
+		Hook:       strings.ToLower(opts.hook),
+		Priority:   priority,
+		LogPrefix:  opts.logPrefix,
+		Version:    version,
+		Source:     source,
+		Stamp:      opts.stamp,
+		Now:        time.Now(),
+		DockerNets: dockerNets,
 	})
 	if !opts.quiet {
 		for _, warn := range warns {
@@ -299,7 +302,7 @@ func compileAction(cmd *cli.Command, positional []string, stdin io.Reader, stdou
 	if optErr != nil {
 		return &commandError{code: 2, lines: []string{optErr.Format()}}
 	}
-	result, err := buildCompiled(opts, priority, positional, stdin, stderr)
+	result, err := buildCompiled(opts, priority, positional, stdin, stderr, nil)
 	if err != nil {
 		return err
 	}
@@ -327,17 +330,70 @@ func applyAction(cmd *cli.Command, positional []string, stdin io.Reader, stderr 
 	if optErr != nil {
 		return &commandError{code: 2, lines: []string{optErr.Format()}}
 	}
-	result, err := buildCompiled(opts, priority, positional, stdin, stderr)
+	dockerNets := detectDockerNets(stderr, opts.quiet)
+	result, err := buildCompiled(opts, priority, positional, stdin, stderr, dockerNets)
 	if err != nil {
 		return err
 	}
-	return applyRuleset(result.ruleset, opts.table, opts.quiet, stderr)
+	return applyRuleset(result.ruleset, opts.table)
+}
+
+// detectDockerNets 在 apply 时探测本机 Docker 网络子网，追加到内网来源放行集合。
+// 没有 docker 命令时返回 nil；docker 存在但探测失败时告警并返回 nil（不阻断 apply）。
+func detectDockerNets(stderr io.Writer, quiet bool) []string {
+	docker, err := exec.LookPath("docker")
+	if err != nil {
+		return nil
+	}
+	out, err := exec.Command(docker, "network", "ls", "--format", "{{.ID}}").Output()
+	if err != nil {
+		if !quiet {
+			fmt.Fprintf(stderr, "efw: 警告: 检测到 docker 但无法列出网络，跳过 Docker 网段：%v\n", err)
+		}
+		return nil
+	}
+	ids := strings.Fields(string(out))
+	if len(ids) == 0 {
+		return nil
+	}
+	args := append([]string{
+		"network", "inspect", "--format",
+		`{{range .IPAM.Config}}{{.Subnet}}{{"\n"}}{{end}}`,
+	}, ids...)
+	out, err = exec.Command(docker, args...).Output()
+	if err != nil {
+		if !quiet {
+			fmt.Fprintf(stderr, "efw: 警告: 无法读取 docker 网络子网，跳过 Docker 网段：%v\n", err)
+		}
+		return nil
+	}
+	seen := make(map[string]struct{})
+	var nets []string
+	for _, line := range strings.Split(string(out), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		if _, parseErr := netip.ParsePrefix(line); parseErr != nil {
+			if !quiet {
+				fmt.Fprintf(stderr, "efw: 警告: 忽略无法解析的 Docker 网段 %q\n", line)
+			}
+			continue
+		}
+		if _, ok := seen[line]; ok {
+			continue
+		}
+		seen[line] = struct{}{}
+		nets = append(nets, line)
+	}
+	sort.Strings(nets)
+	return nets
 }
 
 // applyRuleset 校验后原子替换 table：
 //   - 表存在：同一 nft 批次内 delete + create（失败时旧表保持不变）；
 //   - 表不存在：直接 create。
-func applyRuleset(ruleset []byte, table string, quiet bool, stderr io.Writer) error {
+func applyRuleset(ruleset []byte, table string) error {
 	nft, err := exec.LookPath(nftBinary)
 	if err != nil {
 		return applyErrorf("找不到 %s 命令（应用规则需要 nftables）", nftBinary)
@@ -356,13 +412,6 @@ func applyRuleset(ruleset []byte, table string, quiet bool, stderr io.Writer) er
 	}
 	if out, applyErr := runNft(nft, []string{"-f", "-"}, batch); applyErr != nil {
 		return applyErrorf("nft 应用失败（旧表保持不变）：%s", nftOutput(out, applyErr))
-	}
-	if !quiet {
-		if exists {
-			fmt.Fprintf(stderr, "efw: 已覆盖 table inet %s\n", table)
-		} else {
-			fmt.Fprintf(stderr, "efw: 已创建并应用 table inet %s\n", table)
-		}
 	}
 	return nil
 }

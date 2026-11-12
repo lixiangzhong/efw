@@ -89,8 +89,8 @@ func TestApplyCreateAndOverwrite(t *testing.T) {
 		if stdout.Len() != 0 {
 			t.Fatalf("apply 不应写 stdout，实际:\n%s", stdout.String())
 		}
-		if !strings.Contains(stderr.String(), "已创建并应用 table inet efw") {
-			t.Fatalf("缺少创建状态输出:\n%s", stderr.String())
+		if stderr.Len() != 0 {
+			t.Fatalf("apply 成功时应静默，stderr:\n%s", stderr.String())
 		}
 		applyIn := readFileOrEmpty(t, os.Getenv("FAKE_NFT_APPLY_IN"))
 		if !strings.Contains(applyIn, "table inet efw {") {
@@ -113,8 +113,8 @@ func TestApplyCreateAndOverwrite(t *testing.T) {
 		if exit != 0 {
 			t.Fatalf("退出码 = %d, stderr:\n%s", exit, stderr.String())
 		}
-		if !strings.Contains(stderr.String(), "已覆盖 table inet efw") {
-			t.Fatalf("缺少覆盖状态输出:\n%s", stderr.String())
+		if stderr.Len() != 0 {
+			t.Fatalf("apply 成功时应静默，stderr:\n%s", stderr.String())
 		}
 		applyIn := readFileOrEmpty(t, os.Getenv("FAKE_NFT_APPLY_IN"))
 		if !strings.HasPrefix(applyIn, "delete table inet efw\n") {
@@ -208,4 +208,36 @@ func TestApplyFromStdinAndFileFlag(t *testing.T) {
 			t.Fatalf("exit=%d stderr:\n%s", exit, stderr.String())
 		}
 	})
+}
+
+// TestApplyInjectsDockerNets apply 时应把探测到的 Docker 网段写进来源放行集合。
+func TestApplyInjectsDockerNets(t *testing.T) {
+	aclPath := writeACL(t, validACL)
+	nft := newFakeNft(t)
+	dockerScript := `#!/bin/sh
+case "$1 $2" in
+  "network ls") echo id1; exit 0 ;;
+  "network inspect") echo 172.17.0.0/16; exit 0 ;;
+esac
+exit 1
+`
+	if err := os.WriteFile(filepath.Join(nft.dir, "docker"), []byte(dockerScript), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("FAKE_NFT_EXISTS", "0")
+	var stdout, stderr bytes.Buffer
+	exit := run([]string{"apply", aclPath}, strings.NewReader(""), &stdout, &stderr)
+	if exit != 0 {
+		t.Fatalf("退出码 = %d, stderr:\n%s", exit, stderr.String())
+	}
+	applyIn := readFileOrEmpty(t, os.Getenv("FAKE_NFT_APPLY_IN"))
+	if !strings.Contains(applyIn, "172.17.0.0/16") {
+		t.Fatalf("产物缺少 Docker 网段:\n%s", applyIn)
+	}
+	if strings.Contains(applyIn, "192.168.0.0/16") {
+		t.Fatalf("RFC1918 不应默认放行:\n%s", applyIn)
+	}
+	if stderr.Len() != 0 {
+		t.Fatalf("apply 成功时应静默，stderr:\n%s", stderr.String())
+	}
 }

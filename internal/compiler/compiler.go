@@ -12,7 +12,7 @@ import (
 )
 
 // Version 是产物头与 --version 使用的版本号。
-var Version = "1.0.0"
+var Version = "1.1.0"
 
 // Options 是编译与产物头所需的全部参数。
 type Options struct {
@@ -25,6 +25,8 @@ type Options struct {
 	Source    string
 	Stamp     bool
 	Now       time.Time
+	// DockerNets 是 apply 时探测到的 Docker 网络子网（compile 不填）。
+	DockerNets []string
 }
 
 // Compile 把 DSL 文本编译为完整 nftables ruleset。
@@ -58,6 +60,7 @@ func Compile(src []byte, opts Options) ([]byte, []errs.Warning, error) {
 		Source:           opts.Source,
 		Stamp:            opts.Stamp,
 		Now:              opts.Now,
+		DockerNets:       opts.DockerNets,
 		UnreachableLines: unreachable,
 	})
 	return out, warns, nil
