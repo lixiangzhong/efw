@@ -1,6 +1,6 @@
 v6-bootstrap off
 
-1.1.1.1 -> tcp *:80 accept
-3.3.3.3 -> *:22 drop
+accept { 1.1.1.1 -> tcp *:80 }
+drop { 3.3.3.3 -> *:22 }
 
-accept
+accept { * }

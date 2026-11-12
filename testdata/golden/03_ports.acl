@@ -1,7 +1,7 @@
 v6-bootstrap off
 
-1.1.1.1 -> tcp *:80 accept
-2.2.2.2 -> udp *:53-55 accept
-3.3.3.3 -> tcp *:{8080, 9090-9095} accept
+accept { 1.1.1.1 -> tcp *:80 }
+accept { 2.2.2.2 -> udp *:53-55 }
+accept { 3.3.3.3 -> tcp *:{8080, 9090-9095} }
 
-drop
+drop { * }

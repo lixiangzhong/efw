@@ -1,0 +1,8 @@
+forward off
+v6-bootstrap off
+
+accept{
+  1.1.1.0/24 -> 22
+}
+
+drop { * }

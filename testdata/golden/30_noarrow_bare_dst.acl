@@ -1,14 +1,14 @@
 v6-bootstrap off
 
-10.0.0.1:80 accept
-tcp 10.0.0.2:443 accept
-[2001:db8::1]:22 accept
-1.1.1.1 53 accept
-*:8080 accept
+accept { 10.0.0.1:80 }
+accept { tcp 10.0.0.2:443 }
+accept { [2001:db8::1]:22 }
+accept { 1.1.1.1 53 }
+accept { *:8080 }
 
 accept{
   10.0.0.3:8443
   *:9090
 }
 
-drop
+drop { * }

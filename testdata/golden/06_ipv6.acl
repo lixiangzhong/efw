@@ -1,7 +1,7 @@
 v6-bootstrap off
 
-2001:db8::1 -> tcp [2001:db8::2]:443 accept
-2001:db8::/32 -> udp *:53 accept
-* -> tcp [2001:db8::10]:22 drop
+accept { 2001:db8::1 -> tcp [2001:db8::2]:443 }
+accept { 2001:db8::/32 -> udp *:53 }
+drop { * -> tcp [2001:db8::10]:22 }
 
-drop
+drop { * }

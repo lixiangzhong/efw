@@ -186,6 +186,7 @@ func (r Rule) ActionKey() string {
 type File struct {
 	Established bool // true = auto
 	V6Bootstrap bool // true = auto
+	Forward     bool // true = auto（同时生成 forward 链，仅匹配 DNAT 流量）
 	Rules       []Rule
 }
 

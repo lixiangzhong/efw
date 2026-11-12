@@ -28,6 +28,7 @@ var portItemRe = regexp.MustCompile(`^[0-9]+(-[0-9]+)?$`)
 var directiveNames = map[string]struct{}{
 	"established":  {},
 	"v6-bootstrap": {},
+	"forward":      {},
 }
 
 // blockCtx 是当前动作块的上下文。
@@ -54,12 +55,13 @@ type parser struct {
 
 	estSet       bool
 	v6Set        bool
+	forwardSet   bool
 	rulesStarted bool
 	block        *blockCtx
 }
 
 func (p *parser) run(src []byte) {
-	p.file = &ir.File{Established: true, V6Bootstrap: true}
+	p.file = &ir.File{Established: true, V6Bootstrap: true, Forward: true}
 
 	body := bytes.TrimPrefix(src, []byte(utf8BOM))
 	for i, rawLine := range strings.Split(string(body), "\n") {
@@ -173,20 +175,55 @@ func (p *parser) closeBlock(lineNo int) {
 func (p *parser) parseTopLine(lineNo int, rawLine, text string) {
 	fields := strings.Fields(text)
 	first := strings.ToLower(fields[0])
+	// 块外只允许文件头指令与空行/注释；规则和动作行都必须写在动作块内。
 	switch {
 	case first == "default":
-		p.directiveErr(lineNo, "default 指令已移除：未命中策略改由文件末尾的兜底规则表达（如 drop { * } 或收尾 drop）")
+		p.directiveErr(lineNo, "default 指令已移除：未命中策略改由文件末尾的兜底规则表达（如 drop { * }）")
 	case isDirective(first):
 		p.parseDirective(lineNo, fields)
-	case isVerdictWord(first) || first == "log":
-		p.parseActionOnlyRule(lineNo, rawLine, fields)
-	default:
-		if looksLikeUnknownDirective(fields) {
-			p.directiveErr(lineNo, "未知指令 %q", fields[0])
+	case looksLikeUnknownDirective(fields):
+		p.directiveErr(lineNo, "未知指令 %q", fields[0])
+	case isVerdictWord(first):
+		p.parseStandaloneAction(lineNo, rawLine, fields)
+	case first == "log":
+		if len(fields) == 1 {
+			p.syntaxErr(lineNo, "单独 log 已移除：请写成 log drop / log accept，或放进动作块")
 			return
 		}
-		p.parseRule(lineNo, rawLine, text)
+		if isVerdictWord(fields[1]) {
+			if len(fields) != 2 {
+				p.syntaxErr(lineNo, "兜底简写只接受 [log] accept|drop|reject")
+				return
+			}
+			p.parseStandaloneAction(lineNo, rawLine, fields)
+			return
+		}
+		p.syntaxErr(lineNo, "单独 log 已移除：请写成 log drop / log accept，或放进动作块")
+	default:
+		p.syntaxErr(lineNo, "规则必须写在动作块内（如 accept { ... } / drop { ... } / reject { ... }）")
 	}
+}
+
+// parseStandaloneAction 解析块外兜底简写：[log] accept|drop|reject，
+// 等价于 verdict { * }（匹配一切，只能是展开后的最后一条）。
+func (p *parser) parseStandaloneAction(lineNo int, rawLine string, fields []string) {
+	p.rulesStarted = true
+	log := false
+	idx := 0
+	if strings.EqualFold(fields[0], "log") {
+		log = true
+		idx = 1
+	}
+	if len(fields) != idx+1 {
+		p.syntaxErr(lineNo, "兜底简写只接受 [log] accept|drop|reject")
+		return
+	}
+	verdict, ok := parseVerdict(fields[idx])
+	if !ok {
+		p.syntaxErr(lineNo, "%q 不是合法动作（accept|drop|reject）", fields[idx])
+		return
+	}
+	p.appendRule(lineNo, rawLine, ir.Addr{Any: true}, ir.Addr{Any: true}, ir.ProtoAny, ir.PortSet{}, log, false, verdict)
 }
 
 func (p *parser) parseDirective(lineNo int, fields []string) {
@@ -226,52 +263,19 @@ func (p *parser) parseDirective(lineNo int, fields []string) {
 		}
 		p.file.V6Bootstrap = v
 		p.v6Set = true
+	case "forward":
+		if p.forwardSet {
+			p.directiveErr(lineNo, "forward 指令重复")
+			return
+		}
+		v, ok := parseAutoOff(value)
+		if !ok {
+			p.semanticErr(lineNo, "forward 只接受 auto 或 off，得到 %q", fields[1])
+			return
+		}
+		p.file.Forward = v
+		p.forwardSet = true
 	}
-}
-
-// parseActionOnlyRule 解析单独一行的动作：等价于 `verdict { * }`（匹配一切的兜底规则）。
-// 它是一条普通规则，是否位于最后由 validate 检查。
-func (p *parser) parseActionOnlyRule(lineNo int, rawLine string, fields []string) {
-	p.rulesStarted = true
-	log := false
-	idx := 0
-	if strings.ToLower(fields[0]) == "log" {
-		log = true
-		idx = 1
-	}
-	if idx >= len(fields) {
-		p.syntaxErr(lineNo, "动作行缺少动作（accept|drop|reject）")
-		return
-	}
-	if len(fields) != idx+1 {
-		p.syntaxErr(lineNo, "动作行格式应为 [log] accept|drop|reject（等价于 drop { * }）")
-		return
-	}
-	verdict, ok := parseVerdict(fields[idx])
-	if !ok {
-		p.syntaxErr(lineNo, "%q 不是合法动作（accept|drop|reject）", fields[idx])
-		return
-	}
-	p.appendRule(lineNo, rawLine, ir.Addr{Any: true}, ir.Addr{Any: true},
-		ir.ProtoAny, ir.PortSet{}, log, false, verdict)
-}
-
-func (p *parser) parseRule(lineNo int, rawLine, text string) {
-	p.rulesStarted = true
-
-	arrow := strings.Index(text, "->")
-	if arrow < 0 {
-		p.parseShortRule(lineNo, rawLine, text)
-		return
-	}
-	parts, ok := p.parseRuleWithArrow(lineNo, text, true, ir.VerdictAccept)
-	if !ok {
-		return
-	}
-	if !p.checkFamilies(lineNo, parts.src, parts.dst) {
-		return
-	}
-	p.appendRule(lineNo, rawLine, parts.src, parts.dst, parts.proto, parts.ports, parts.log, parts.logOnly, parts.verdict)
 }
 
 // ruleParts 是一条规则解析完成的中间结果。
@@ -285,12 +289,9 @@ type ruleParts struct {
 	verdict ir.Verdict
 }
 
-// parseRuleWithArrow 解析带 -> 的规则主体。
-//
-// actionRequired=true 时必须显式写动作（顶层规则）；
-// actionRequired=false 时动作可省略并继承 blockVerdict（动作块内规则），
-// 显式动作必须与 blockVerdict 一致。协议 token 可出现在匹配部分的任意位置且最多一次。
-func (p *parser) parseRuleWithArrow(lineNo int, text string, actionRequired bool, blockVerdict ir.Verdict) (ruleParts, bool) {
+// parseRuleWithArrow 解析动作块内带 -> 的规则主体：动作可省略并继承 blockVerdict，
+// 显式动作必须与 blockVerdict 一致；协议 token 可出现在匹配部分的任意位置且最多一次。
+func (p *parser) parseRuleWithArrow(lineNo int, text string, blockVerdict ir.Verdict) (ruleParts, bool) {
 	var parts ruleParts
 
 	arrow := strings.Index(text, "->")
@@ -320,36 +321,27 @@ func (p *parser) parseRuleWithArrow(lineNo int, text string, actionRequired bool
 	}
 
 	var matchTokens []string
-	if actionRequired {
-		verdict, log, logOnly, matchCount, ok := p.parseActionTokens(lineNo, fields)
-		if !ok {
-			return parts, false
-		}
-		parts.verdict, parts.log, parts.logOnly = verdict, log, logOnly
-		matchTokens = fields[:matchCount]
-	} else {
-		log := false
-		n := len(fields)
-		if n > 0 {
-			last := strings.ToLower(fields[n-1])
-			if last == "log" {
+	log := false
+	n := len(fields)
+	if n > 0 {
+		last := strings.ToLower(fields[n-1])
+		if last == "log" {
+			log = true
+			n--
+		} else if v, ok := parseVerdict(fields[n-1]); ok {
+			if v != blockVerdict {
+				p.semanticErr(lineNo, "块内规则动作必须与块头一致（块为 %s）", blockVerdict)
+				return parts, false
+			}
+			n--
+			if n > 0 && strings.EqualFold(fields[n-1], "log") {
 				log = true
 				n--
-			} else if v, ok := parseVerdict(fields[n-1]); ok {
-				if v != blockVerdict {
-					p.semanticErr(lineNo, "块内规则动作必须与块头一致（块为 %s）", blockVerdict)
-					return parts, false
-				}
-				n--
-				if n > 0 && strings.EqualFold(fields[n-1], "log") {
-					log = true
-					n--
-				}
 			}
 		}
-		parts.verdict, parts.log = blockVerdict, log
-		matchTokens = fields[:n]
 	}
+	parts.verdict, parts.log = blockVerdict, log
+	matchTokens = fields[:n]
 	if len(matchTokens) == 0 {
 		p.syntaxErr(lineNo, "规则缺少匹配部分")
 		return parts, false
@@ -389,56 +381,6 @@ func (p *parser) parseRuleWithArrow(lineNo int, text string, actionRequired bool
 	return parts, true
 }
 
-// parseShortRule 解析省略 -> 的简写：src [proto] [log] action，等价 src -> *://*:*。
-func (p *parser) parseShortRule(lineNo int, rawLine, text string) {
-	fields := splitRuleFields(text)
-	if len(fields) == 0 {
-		p.syntaxErr(lineNo, "规则缺少 ->")
-		return
-	}
-	if allPortTokens(fields) {
-		p.syntaxErr(lineNo, "无箭头简写需要动作（如 `80 443 accept`；块内可省略）")
-		return
-	}
-	verdict, log, logOnly, matchCount, ok := p.parseActionTokens(lineNo, fields)
-	if !ok {
-		return
-	}
-	matchTokens := mergePortListFragments(fields[:matchCount])
-	proto, rest, _, ok := p.extractProtoTokens(lineNo, matchTokens, ir.ProtoAny, false)
-	if !ok {
-		return
-	}
-	if len(rest) > 0 && hasPortSemantics(rest) {
-		// 含端口的 token 不可能是源地址（本语法无源端口）：
-		// 视为隐式 * 源的目的地址/端口，如 `10.0.0.1:80 accept` ≡ `* -> 10.0.0.1:80 accept`。
-		dst, ports, ok := p.parseRhsMatchTokens(lineNo, rest)
-		if !ok {
-			return
-		}
-		p.appendRule(lineNo, rawLine, ir.Addr{Any: true}, dst, proto, ports, log, logOnly, verdict)
-		return
-	}
-	if len(rest) == 0 {
-		// 只有协议 token（如 `tcp4 accept`）：隐式 * 源，等价 `* -> tcp4`。
-		if proto == ir.ProtoAny {
-			p.syntaxErr(lineNo, "无箭头简写缺少匹配部分")
-			return
-		}
-		p.appendRule(lineNo, rawLine, ir.Addr{Any: true}, ir.Addr{Any: true}, proto, ir.PortSet{}, log, logOnly, verdict)
-		return
-	}
-	if len(rest) != 1 {
-		p.syntaxErr(lineNo, "无箭头写法只能写「协议? 源地址」或「协议? 端口」")
-		return
-	}
-	src, ok := p.parseSrcToken(lineNo, rest[0])
-	if !ok {
-		return
-	}
-	p.appendRule(lineNo, rawLine, src, ir.Addr{Any: true}, proto, ir.PortSet{}, log, logOnly, verdict)
-}
-
 // parseBlockRule 解析动作块内的规则：action 可省略（继承块动作），显式动作必须与块一致。
 func (p *parser) parseBlockRule(lineNo int, rawLine, text string) {
 	verdict := p.block.verdict
@@ -458,7 +400,7 @@ func (p *parser) parseBlockRule(lineNo int, rawLine, text string) {
 		p.parseBlockShortRule(lineNo, rawLine, text, verdict)
 		return
 	}
-	parts, ok := p.parseRuleWithArrow(lineNo, text, false, verdict)
+	parts, ok := p.parseRuleWithArrow(lineNo, text, verdict)
 	if !ok {
 		return
 	}
@@ -526,44 +468,6 @@ func (p *parser) parseBlockShortRule(lineNo int, rawLine, text string, verdict i
 	}
 	p.appendRule(lineNo, rawLine, src, ir.Addr{Any: true}, proto, ir.PortSet{}, log, false, verdict)
 	p.block.rules++
-}
-
-// parseActionTokens 从右侧解析 [log] verdict 或单独的 log，返回匹配字段个数。
-func (p *parser) parseActionTokens(lineNo int, fields []string) (verdict ir.Verdict, log, logOnly bool, matchCount int, ok bool) {
-	n := len(fields)
-	switch strings.ToLower(fields[n-1]) {
-	case "accept", "drop", "reject":
-		verdict, _ = parseVerdict(fields[n-1])
-		n--
-	case "log":
-		logOnly = true
-		n--
-	default:
-		p.syntaxErr(lineNo, "%q 不是合法动作（accept|drop|reject|log）", fields[n-1])
-		return 0, false, false, 0, false
-	}
-	if !logOnly && n >= 1 && strings.EqualFold(fields[n-1], "log") {
-		log = true
-		n--
-		if n >= 1 && strings.EqualFold(fields[n-1], "log") {
-			p.syntaxErr(lineNo, "log 重复出现")
-			return 0, false, false, 0, false
-		}
-	}
-	return verdict, log, logOnly, n, true
-}
-
-// allPortTokens 判断 tokens 是否全部是端口/范围/列表（裸端口行的隐式 * 源简写）。
-func allPortTokens(tokens []string) bool {
-	if len(tokens) == 0 {
-		return false
-	}
-	for _, tok := range tokens {
-		if !looksLikePortSet(tok) {
-			return false
-		}
-	}
-	return true
 }
 
 // hasPortSemantics 判断无箭头写法的匹配 token 中是否包含端口语义

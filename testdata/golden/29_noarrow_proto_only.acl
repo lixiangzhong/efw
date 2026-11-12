@@ -13,4 +13,4 @@ accept{
   icmp
 }
 
-drop
+drop { * }

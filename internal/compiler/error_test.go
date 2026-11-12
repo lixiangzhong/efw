@@ -12,6 +12,12 @@ import (
 // compileErrors 取出编译错误列表；要求确实失败。测试输入会自动补兜底规则。
 func compileErrors(t *testing.T, src string) errs.Errors {
 	t.Helper()
+	return compileErrorsRaw(t, blockifyLegacy(src))
+}
+
+// compileErrorsRaw 不做块化转换，用于专门验证块外语法被拒绝。
+func compileErrorsRaw(t *testing.T, src string) errs.Errors {
+	t.Helper()
 	_, _, err := compiler.Compile([]byte(src), testOptions("<test>"))
 	if err == nil {
 		t.Fatal("期望编译失败，实际成功")
@@ -37,9 +43,9 @@ func TestCompileErrors(t *testing.T) {
 		{"端口越界", "1.1.1.1 -> tcp *:70000 accept\n", errs.CategorySemantic, errs.CodeSemantic, "越界"},
 		{"端口范围倒置", "1.1.1.1 -> tcp *:90-80 accept\n", errs.CategorySemantic, errs.CodeSemantic, "起点大于终点"},
 		{"缺少箭头（两个目的地址）", "1.1.1.1 tcp *:80 accept\n", errs.CategorySemantic, errs.CodeSemantic, "目的地址只能出现一次"},
-		{"未知动作", "1.1.1.1 -> tcp *:80 allow\n", errs.CategorySyntax, errs.CodeSyntax, "不是合法动作"},
+		{"块外未知动作", "1.1.1.1 -> tcp *:80 allow\n", errs.CategorySyntax, errs.CodeSyntax, "规则必须写在动作块内"},
 		{"未知协议 token", "1.1.1.1 -> sctp 80 accept\n", errs.CategorySemantic, errs.CodeSemantic, "未知协议"},
-		{"花括号不匹配", "1.1.1.1 -> tcp *:{80,443 accept\n", errs.CategorySyntax, errs.CodeSyntax, "花括号不匹配"},
+		{"花括号不匹配", "accept {\n1.1.1.1 -> tcp *:{80,443\n}\ndrop { * }\n", errs.CategorySyntax, errs.CodeSyntax, "花括号不匹配"},
 		{"动作行后面还有规则", "1.1.1.1 -> tcp *:80 accept\ndrop\n2.2.2.2 -> tcp *:80 accept\n", errs.CategorySemantic, errs.CodeSemantic, "匹配一切的规则必须是展开后的最后一条"},
 		{"多个匹配一切规则", "drop\nreject\n", errs.CategorySemantic, errs.CodeSemantic, "匹配一切的规则必须是展开后的最后一条"},
 		{"未知指令", "bogus auto\n1.1.1.1 -> tcp *:80 accept\n", errs.CategorySemantic, errs.CodeDirective, "未知指令"},
@@ -70,8 +76,8 @@ func TestMissingFallback(t *testing.T) {
 		src  string
 		want string
 	}{
-		{"只有普通规则", "v6-bootstrap off\n1.1.1.1 -> tcp *:80 accept\n", "缺少兜底规则"},
-		{"最后一条是 log-only", "v6-bootstrap off\n1.1.1.1 -> tcp *:80 log\n", "缺少兜底规则"},
+		{"只有普通规则", "v6-bootstrap off\naccept { 1.1.1.1 -> tcp *:80 }\n", "缺少兜底规则"},
+		{"最后一条是块内 log 修饰", "v6-bootstrap off\naccept { 1.1.1.1 -> tcp *:80 log }\n", "缺少兜底规则"},
 		{"空文件", "", "缺少兜底规则"},
 		{"块内没有匹配一切", "accept {\n1.1.1.1 -> tcp *:80\n}\n", "缺少兜底规则"},
 	}
@@ -97,8 +103,8 @@ func TestErrorFormat(t *testing.T) {
 
 // TestLineEndingsAndBOM 验证 CRLF 与 UTF-8 BOM 不影响解析结果。
 func TestLineEndingsAndBOM(t *testing.T) {
-	lf := "v6-bootstrap off\n1.1.1.1 -> tcp *:80 accept\ndrop\n"
-	crlf := "\xef\xbb\xbfv6-bootstrap off\r\n1.1.1.1 -> tcp *:80 accept\r\ndrop\r\n"
+	lf := "v6-bootstrap off\naccept { 1.1.1.1 -> tcp *:80 }\ndrop { * }\n"
+	crlf := "\xef\xbb\xbfv6-bootstrap off\r\naccept { 1.1.1.1 -> tcp *:80 }\r\ndrop { * }\r\n"
 
 	opts := testOptions("<test>")
 	gotLF, _, err := compiler.Compile([]byte(lf), opts)
@@ -117,7 +123,7 @@ func TestLineEndingsAndBOM(t *testing.T) {
 // TestBareLogRejected 单独 log 动作行缺少 verdict。
 func TestLogOnlyCatchAllRejected(t *testing.T) {
 	list := compileErrors(t, "log\n")
-	if !strings.Contains(list.Error(), "动作行缺少动作") {
+	if !strings.Contains(list.Error(), "单独 log 已移除") {
 		t.Fatalf("错误信息不符: %s", list.Error())
 	}
 }
@@ -155,7 +161,7 @@ func TestShorthandForms(t *testing.T) {
 		{"简写端口越界", "1.1.1.2 -> 70000 accept\n", "越界"},
 		{"简写端口范围倒置", "1.1.1.2 -> 90-80 accept\n", "起点大于终点"},
 		{"无箭头但带两个目的地址", "1.1.1.2 tcp *:80 accept\n", "目的地址只能出现一次"},
-		{"无箭头缺少动作", "1.1.1.2\n", "不是合法动作"},
+		{"块外裸地址（已移除）", "1.1.1.2\n", "规则必须写在动作块内"},
 	}
 	for _, tc := range invalid {
 		t.Run(tc.name, func(t *testing.T) {
@@ -292,9 +298,13 @@ func TestBarePortRule(t *testing.T) {
 			if !strings.Contains(string(out), tc.want) {
 				t.Fatalf("产物缺少 %q:\n%s", tc.want, out)
 			}
-			// 隐式 * 源：不应生成源地址匹配。
-			if !strings.Contains(tc.name, "等价 *") && strings.Contains(string(out), "ip saddr") {
-				t.Fatalf("裸端口行不应生成源地址匹配:\n%s", out)
+			// 隐式 * 源：该规则行不应生成源地址匹配（内网来源放行是独立自动规则）。
+			if !strings.Contains(tc.name, "等价 *") {
+				for _, line := range strings.Split(string(out), "\n") {
+					if strings.Contains(line, tc.want) && strings.Contains(line, "ip saddr") {
+						t.Fatalf("裸端口规则不应生成源地址匹配:\n%s", line)
+					}
+				}
 			}
 		})
 	}
@@ -304,7 +314,7 @@ func TestBarePortRule(t *testing.T) {
 		src  string
 		want string
 	}{
-		{"顶层裸端口缺动作", "80 443\ndrop\n", "无箭头简写需要动作"},
+		{"块外裸端口（已移除）", "80 443\ndrop\n", "规则必须写在动作块内"},
 	}
 	for _, tc := range invalid {
 		t.Run(tc.name, func(t *testing.T) {

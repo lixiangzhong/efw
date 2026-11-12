@@ -1,14 +1,14 @@
 v6-bootstrap off
 
-1.1.1.2 accept
-1.1.1.3 -> tcp accept
-1.1.1.4 -> 8080 accept
-1.1.1.5 -> {80, 443} accept
-1.1.1.6 -> 8000-8010 log drop
-1.1.1.7 -> tcp 8443 accept
-2.2.2.2 -> 8081 accept
-2.2.2.2 -> 8082 accept
-2001:db8::1 accept
-2001:db8::2 accept
+accept { 1.1.1.2 }
+accept { 1.1.1.3 -> tcp }
+accept { 1.1.1.4 -> 8080 }
+accept { 1.1.1.5 -> {80, 443} }
+drop { 1.1.1.6 -> 8000-8010 log }
+accept { 1.1.1.7 -> tcp 8443 }
+accept { 2.2.2.2 -> 8081 }
+accept { 2.2.2.2 -> 8082 }
+accept { 2001:db8::1 }
+accept { 2001:db8::2 }
 
-drop
+drop { * }

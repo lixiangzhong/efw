@@ -6,4 +6,4 @@ accept{
   tcp 3306
 }
 
-drop
+drop { * }

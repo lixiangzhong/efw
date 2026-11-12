@@ -13,4 +13,4 @@ accept{
   tcp 1.1.1.3 -> 443
 }
 
-drop
+drop { * }

@@ -13,5 +13,5 @@ drop {
     2.2.2.3 -> tcp *:8080
 }
 
-5.5.5.5 -> tcp *:443 accept
-log drop
+accept { 5.5.5.5 -> tcp *:443 }
+drop { * log }

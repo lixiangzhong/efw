@@ -1,7 +1,7 @@
 v6-bootstrap off
 
-2001:db8::1 -> tcp *:80 accept
-2001:db8::2 -> tcp *:80 accept
-2001:db8::3 -> tcp *:80 accept
+accept { 2001:db8::1 -> tcp *:80 }
+accept { 2001:db8::2 -> tcp *:80 }
+accept { 2001:db8::3 -> tcp *:80 }
 
-drop
+drop { * }
