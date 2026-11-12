@@ -19,6 +19,7 @@ const (
 	CategorySyntax   Category = "syntax"
 	CategorySemantic Category = "semantic"
 	CategoryUsage    Category = "usage"
+	CategoryApply    Category = "apply"
 	CategoryWarning  Category = "warning"
 )
 
@@ -28,6 +29,7 @@ const (
 	CodeSyntax    = "E101" // 词法/语法问题
 	CodeSemantic  = "E102" // 字段组合等语义问题
 	CodeUsage     = "E103" // CLI 用法问题
+	CodeApply     = "E104" // apply 环境/执行失败（nft 缺失、权限、nft 报错）
 )
 
 // 告警码（SPEC §6）。

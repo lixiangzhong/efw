@@ -2,11 +2,13 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"regexp"
 	"strconv"
 	"strings"
@@ -19,6 +21,9 @@ import (
 
 // version 是 --version 与产物头使用的版本号。
 const version = compiler.Version
+
+// nftBinary 是 apply 模式调用的 nft 命令。
+const nftBinary = "nft"
 
 var (
 	// identifierRe 校验 table/chain 名：nft 标识符规则。
@@ -91,9 +96,9 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 func newCommand(stdin io.Reader, stdout, stderr io.Writer) *cli.Command {
 	return &cli.Command{
 		Name:        "efw",
-		Usage:       "把 ACL DSL 编译为完整 nftables ruleset",
-		UsageText:   "efw <file> [flags]\n   efw -f <file> [flags]\n   efw compile [flags] [file]",
-		Description: "纯离线编译器：DSL → nftables ruleset 文本。不给文件时从 stdin 读取，产物默认写到 stdout。",
+		Usage:       "把 ACL DSL 编译为 nftables ruleset，或直接应用到内核",
+		UsageText:   "efw <file> [flags]\n   efw compile [flags] [file]\n   efw apply [flags] [file]",
+		Description: "DSL → nftables ruleset 文本（compile）或编译后原子应用到内核（apply，需 root/CAP_NET_ADMIN）。不给文件时从 stdin 读取。",
 		Version:     version,
 		Reader:      stdin,
 		Writer:      stdout,
@@ -107,6 +112,7 @@ func newCommand(stdin io.Reader, stdout, stderr io.Writer) *cli.Command {
 		Flags: compileFlags(),
 		Commands: []*cli.Command{
 			compileCommand(stdin, stdout, stderr),
+			applyCommand(stdin, stderr),
 			versionCommand(stdout),
 		},
 		Action: func(ctx context.Context, cmd *cli.Command) error {
@@ -127,7 +133,7 @@ func rootAction(cmd *cli.Command, stdin io.Reader, stdout, stderr io.Writer) err
 	cmd.Writer = cmd.ErrWriter
 	_ = cli.DefaultShowRootCommandHelp(cmd)
 	cmd.Writer = writer
-	return usageErrorf("缺少子命令（仅支持 compile）")
+	return usageErrorf("缺少子命令（仅支持 compile/apply）")
 }
 
 func compileFlags() []cli.Flag {
@@ -191,25 +197,38 @@ func collectOptions(cmd *cli.Command) (compileOptions, error) {
 	return opts, nil
 }
 
-func compileAction(cmd *cli.Command, positional []string, stdin io.Reader, stdout, stderr io.Writer) error {
-	opts, err := collectOptions(cmd)
-	if err != nil {
-		return err
+// applyCommand 把编译结果原子应用到内核；重复执行即覆盖自己的 table。
+func applyCommand(stdin io.Reader, stderr io.Writer) *cli.Command {
+	return &cli.Command{
+		Name:      "apply",
+		Usage:     "编译并原子应用到内核（覆盖同名 table，需 root/CAP_NET_ADMIN）",
+		UsageText: "efw apply [flags] [file]",
+		ArgsUsage: "[file]",
+		Flags:     compileFlags(),
+		OnUsageError: func(ctx context.Context, cmd *cli.Command, err error, isSubcommand bool) error {
+			return usageErrorf("%v", err)
+		},
+		Action: func(ctx context.Context, cmd *cli.Command) error {
+			return applyAction(cmd, cmd.Args().Slice(), stdin, stderr)
+		},
 	}
+}
 
-	priority, optErr := checkOptions(opts.table, opts.chain, opts.hook, opts.priority, opts.logPrefix)
-	if optErr != nil {
-		return &commandError{code: 2, lines: []string{optErr.Format()}}
-	}
+// compileResult 是编译产物与告警。
+type compileResult struct {
+	ruleset []byte
+	warns   []errs.Warning
+}
 
-	source := "<stdin>"
-	var src []byte
+// readSource 解析输入来源：-f/--file、唯一位置参数，否则 stdin。
+func readSource(opts compileOptions, positional []string, stdin io.Reader) (string, []byte, error) {
 	if len(positional) > 1 {
-		return usageErrorf("最多接受一个输入文件")
+		return "", nil, usageErrorf("最多接受一个输入文件")
 	}
 	if opts.file != "" && len(positional) == 1 {
-		return usageErrorf("-f/--file 与位置参数只能二选一")
+		return "", nil, usageErrorf("-f/--file 与位置参数只能二选一")
 	}
+	source := "<stdin>"
 	switch {
 	case opts.file != "":
 		source = opts.file
@@ -217,20 +236,26 @@ func compileAction(cmd *cli.Command, positional []string, stdin io.Reader, stdou
 		source = positional[0]
 	}
 	if source == "<stdin>" {
-		data, readErr := io.ReadAll(stdin)
-		if readErr != nil {
-			return usageErrorf("无法读取 stdin：%v", readErr)
+		data, err := io.ReadAll(stdin)
+		if err != nil {
+			return "", nil, usageErrorf("无法读取 stdin：%v", err)
 		}
-		src = data
-	} else {
-		data, readErr := os.ReadFile(source)
-		if readErr != nil {
-			return usageErrorf("无法读取文件：%v", readErr)
-		}
-		src = data
+		return source, data, nil
 	}
+	data, err := os.ReadFile(source)
+	if err != nil {
+		return "", nil, usageErrorf("无法读取文件：%v", err)
+	}
+	return source, data, nil
+}
 
-	out, warns, compileErr := compiler.Compile(src, compiler.Options{
+// buildCompiled 读取 DSL 并完成编译，告警写到 stderr。
+func buildCompiled(opts compileOptions, priority string, positional []string, stdin io.Reader, stderr io.Writer) (compileResult, error) {
+	source, src, err := readSource(opts, positional, stdin)
+	if err != nil {
+		return compileResult{}, err
+	}
+	ruleset, warns, compileErr := compiler.Compile(src, compiler.Options{
 		Table:     opts.table,
 		Chain:     opts.chain,
 		Hook:      strings.ToLower(opts.hook),
@@ -247,27 +272,142 @@ func compileAction(cmd *cli.Command, positional []string, stdin io.Reader, stdou
 		}
 	}
 	if compileErr != nil {
-		var list errs.Errors
-		if errors.As(compileErr, &list) {
-			lines := make([]string, 0, len(list))
-			for _, item := range list {
-				lines = append(lines, item.Format())
-			}
-			return &commandError{code: 1, lines: lines}
-		}
-		return &commandError{code: 1, lines: []string{compileErr.Error()}}
+		return compileResult{}, compileError(compileErr)
 	}
+	return compileResult{ruleset: ruleset, warns: warns}, nil
+}
 
+// compileError 把编译错误转换为退出码 1 的命令错误。
+func compileError(err error) error {
+	var list errs.Errors
+	if errors.As(err, &list) {
+		lines := make([]string, 0, len(list))
+		for _, item := range list {
+			lines = append(lines, item.Format())
+		}
+		return &commandError{code: 1, lines: lines}
+	}
+	return &commandError{code: 1, lines: []string{err.Error()}}
+}
+
+func compileAction(cmd *cli.Command, positional []string, stdin io.Reader, stdout, stderr io.Writer) error {
+	opts, err := collectOptions(cmd)
+	if err != nil {
+		return err
+	}
+	priority, optErr := checkOptions(opts.table, opts.chain, opts.hook, opts.priority, opts.logPrefix)
+	if optErr != nil {
+		return &commandError{code: 2, lines: []string{optErr.Format()}}
+	}
+	result, err := buildCompiled(opts, priority, positional, stdin, stderr)
+	if err != nil {
+		return err
+	}
 	if opts.output == "" {
-		if _, writeErr := stdout.Write(out); writeErr != nil {
+		if _, writeErr := stdout.Write(result.ruleset); writeErr != nil {
 			return usageErrorf("写入 stdout 失败：%v", writeErr)
 		}
 		return nil
 	}
-	if writeErr := os.WriteFile(opts.output, out, 0o644); writeErr != nil {
+	if writeErr := os.WriteFile(opts.output, result.ruleset, 0o644); writeErr != nil {
 		return usageErrorf("无法写入文件：%v", writeErr)
 	}
 	return nil
+}
+
+func applyAction(cmd *cli.Command, positional []string, stdin io.Reader, stderr io.Writer) error {
+	opts, err := collectOptions(cmd)
+	if err != nil {
+		return err
+	}
+	if cmd.IsSet("output") {
+		return usageErrorf("apply 不支持 -o/--output（需要产物文件请用 compile）")
+	}
+	priority, optErr := checkOptions(opts.table, opts.chain, opts.hook, opts.priority, opts.logPrefix)
+	if optErr != nil {
+		return &commandError{code: 2, lines: []string{optErr.Format()}}
+	}
+	result, err := buildCompiled(opts, priority, positional, stdin, stderr)
+	if err != nil {
+		return err
+	}
+	return applyRuleset(result.ruleset, opts.table, opts.quiet, stderr)
+}
+
+// applyRuleset 校验后原子替换 table：
+//   - 表存在：同一 nft 批次内 delete + create（失败时旧表保持不变）；
+//   - 表不存在：直接 create。
+func applyRuleset(ruleset []byte, table string, quiet bool, stderr io.Writer) error {
+	nft, err := exec.LookPath(nftBinary)
+	if err != nil {
+		return applyErrorf("找不到 %s 命令（应用规则需要 nftables）", nftBinary)
+	}
+	if out, checkErr := runNft(nft, []string{"-c", "-f", "-"}, ruleset); checkErr != nil {
+		return applyErrorf("nft 校验失败：%s", nftOutput(out, checkErr))
+	}
+	exists, err := nftTableExists(nft, table)
+	if err != nil {
+		return err
+	}
+
+	batch := ruleset
+	if exists {
+		batch = append([]byte("delete table inet "+table+"\n"), ruleset...)
+	}
+	if out, applyErr := runNft(nft, []string{"-f", "-"}, batch); applyErr != nil {
+		return applyErrorf("nft 应用失败（旧表保持不变）：%s", nftOutput(out, applyErr))
+	}
+	if !quiet {
+		if exists {
+			fmt.Fprintf(stderr, "efw: 已覆盖 table inet %s\n", table)
+		} else {
+			fmt.Fprintf(stderr, "efw: 已创建并应用 table inet %s\n", table)
+		}
+	}
+	return nil
+}
+
+// nftTableExists 通过 nft list 判断 table 是否已存在。
+func nftTableExists(nft, table string) (bool, error) {
+	out, err := runNft(nft, []string{"list", "table", "inet", table}, nil)
+	if err == nil {
+		return true, nil
+	}
+	if strings.Contains(out, "No such file or directory") {
+		return false, nil
+	}
+	return false, applyErrorf("探测 table inet %s 失败：%s", table, nftOutput(out, err))
+}
+
+func runNft(nft string, args []string, stdin []byte) (string, error) {
+	cmd := exec.Command(nft, args...)
+	if stdin != nil {
+		cmd.Stdin = bytes.NewReader(stdin)
+	}
+	out, err := cmd.CombinedOutput()
+	return string(out), err
+}
+
+// nftOutput 汇总 nft 的错误输出，并对权限问题给出提示。
+func nftOutput(out string, err error) string {
+	text := strings.TrimSpace(out)
+	if text == "" {
+		if err != nil {
+			return err.Error()
+		}
+		return "未知错误"
+	}
+	if strings.Contains(text, "Operation not permitted") || strings.Contains(text, "cache initialization failed") {
+		return text + "（需要 root 或 CAP_NET_ADMIN）"
+	}
+	return text
+}
+
+func applyErrorf(format string, args ...any) error {
+	return &commandError{
+		code:  2,
+		lines: []string{errs.NewError("", 0, 0, errs.CategoryApply, errs.CodeApply, format, args...).Format()},
+	}
 }
 
 func versionCommand(stdout io.Writer) *cli.Command {
@@ -298,6 +438,10 @@ func checkOptions(table, chain, hook, priority, logPrefix string) (string, *errs
 	if _, reserved := reservedNftWords[strings.ToLower(chain)]; reserved {
 		return "", errs.NewError("", 0, 0, errs.CategoryUsage, errs.CodeUsage,
 			"chain 名 %q 是 nft 关键字，不能使用", chain)
+	}
+	if strings.EqualFold(chain, "forward") {
+		return "", errs.NewError("", 0, 0, errs.CategoryUsage, errs.CodeUsage,
+			"chain 名不能是 forward（与内置转发链冲突）")
 	}
 	if !strings.EqualFold(hook, "input") {
 		return "", errs.NewError("", 0, 0, errs.CategoryUsage, errs.CodeUsage,

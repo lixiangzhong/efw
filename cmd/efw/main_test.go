@@ -8,10 +8,10 @@ import (
 	"testing"
 )
 
-const validACL = "v6-bootstrap off\n1.1.1.1 -> tcp *:80 accept\ndrop\n"
+const validACL = "v6-bootstrap off\naccept { 1.1.1.1 -> tcp *:80 }\ndrop { * }\n"
 
 // fallbackAcceptACL 用于验证默认告警输出与 --quiet（兜底 accept → W3）。
-const fallbackAcceptACL = "v6-bootstrap off\n1.1.1.1 -> tcp *:80 accept\naccept\n"
+const fallbackAcceptACL = "v6-bootstrap off\naccept { 1.1.1.1 -> tcp *:80 }\naccept { * }\n"
 
 func TestRun(t *testing.T) {
 	cases := []struct {
@@ -28,7 +28,7 @@ func TestRun(t *testing.T) {
 		{name: "未知命令或文件不存在", args: []string{"foo"}, wantExit: 2, wantStderr: "E103"},
 		{name: "stdin 编译", args: []string{"compile"}, stdin: validACL, wantExit: 0, wantStdout: "table inet efw {"},
 		{name: "stdin 来源标注", args: []string{"compile"}, stdin: validACL, wantExit: 0, wantStdout: "# source: <stdin>"},
-		{name: "编译错误退出码", args: []string{"compile"}, stdin: "1.1.1.1 -> tcp *:80 accept\n", wantExit: 1, wantStderr: "E100"},
+		{name: "编译错误退出码", args: []string{"compile"}, stdin: "v6-bootstrap off\naccept { 1.1.1.1 -> tcp *:80 }\n", wantExit: 1, wantStderr: "E100"},
 		{name: "文件不存在", args: []string{"compile", "/nonexistent/efw.acl"}, wantExit: 2, wantStderr: "E103"},
 		{name: "非法 hook", args: []string{"compile", "--hook", "forward"}, stdin: validACL, wantExit: 2, wantStderr: "E103"},
 		{name: "非法 priority", args: []string{"compile", "--priority", "not-a-priority"}, stdin: validACL, wantExit: 2, wantStderr: "E103"},
@@ -40,7 +40,7 @@ func TestRun(t *testing.T) {
 		{
 			name:       "部署参数透传",
 			args:       []string{"compile", "--table", "myt", "--chain", "myc", "--priority", "-10", "--log-prefix", "XX "},
-			stdin:      "v6-bootstrap off\n1.1.1.1 -> tcp *:80 log drop\ndrop\n",
+			stdin:      "v6-bootstrap off\ndrop { 1.1.1.1 -> tcp *:80 log }\ndrop { * }\n",
 			wantExit:   0,
 			wantStdout: "table inet myt {",
 		},
@@ -122,7 +122,7 @@ func TestPriorityNormalization(t *testing.T) {
 func TestRunDeployFlags(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	exit := run([]string{"compile", "--table", "myt", "--chain", "myc", "--priority", "-10", "--log-prefix", "XX "},
-		strings.NewReader("v6-bootstrap off\n1.1.1.1 -> tcp *:80 log drop\ndrop\n"), &stdout, &stderr)
+		strings.NewReader("v6-bootstrap off\ndrop { 1.1.1.1 -> tcp *:80 log }\ndrop { * }\n"), &stdout, &stderr)
 	if exit != 0 {
 		t.Fatalf("退出码 %d, stderr: %s", exit, stderr.String())
 	}
@@ -139,7 +139,7 @@ func TestRunFileFlag(t *testing.T) {
 	dir := t.TempDir()
 	aclPath := filepath.Join(dir, "rules.acl")
 	// 首行 shebang 由解析器当注释忽略；-f 由 CLI 消费。
-	content := "#!/usr/local/bin/efw -f\n\naccept{\n  1.1.1.0/24 -> 22\n}\n\ndrop\n"
+	content := "#!/usr/local/bin/efw -f\n\naccept{\n  1.1.1.0/24 -> 22\n}\n\ndrop { * }\n"
 	if err := os.WriteFile(aclPath, []byte(content), 0o755); err != nil {
 		t.Fatal(err)
 	}
