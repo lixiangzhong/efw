@@ -6,6 +6,9 @@
 #   curl -fsSL https://raw.githubusercontent.com/lixiangzhong/efw/main/install.sh | BINDIR="$HOME/.local/bin" sh
 #   wget -qO- https://raw.githubusercontent.com/lixiangzhong/efw/main/install.sh | sh
 #
+# 国内网络：官方地址连不上时自动改用下面的镜像前缀重试。
+#   curl -fsSL https://gh-proxy.com/https://raw.githubusercontent.com/lixiangzhong/efw/main/install.sh | sh
+#
 # 仅支持 Linux（amd64 / arm64），默认安装到 /usr/local/bin/efw。
 set -eu
 
@@ -13,27 +16,66 @@ REPO="lixiangzhong/efw"
 BINDIR="${BINDIR:-/usr/local/bin}"
 VERSION="${VERSION:-}"
 
+# GitHub 加速前缀：每次下载都先试官方直连，失败后按顺序改用镜像重试。
+MIRRORS="https://gh-proxy.com https://ghfast.top https://ghproxy.net \
+	https://gh-proxy.org https://github.cnxiaobai.com https://gh.noki.eu.org"
+
+# 直连被墙时通常卡在 TCP 建连阶段，超时设短一些，尽快切到镜像。
+NET_TIMEOUT=6
+# 能连上但被限速/阻断时，低于 MIN_SPEED 持续 STALL_SECONDS 秒即放弃当前源。
+MIN_SPEED=1024
+STALL_SECONDS=20
+
 die() {
 	echo "install.sh: $*" >&2
 	exit 1
 }
 
+command -v curl >/dev/null 2>&1 || command -v wget >/dev/null 2>&1 || die "需要 curl 或 wget"
+
 fetch_stdout() {
 	if command -v curl >/dev/null 2>&1; then
-		curl -fsSL "$1"
-	elif command -v wget >/dev/null 2>&1; then
-		wget -qO- "$1"
+		curl -fsSL --connect-timeout "$NET_TIMEOUT" \
+			--speed-limit "$MIN_SPEED" --speed-time "$STALL_SECONDS" "$1"
 	else
-		die "需要 curl 或 wget"
+		wget -q -T "$NET_TIMEOUT" -t 1 -O - "$1"
 	fi
 }
 
 download() {
 	if command -v curl >/dev/null 2>&1; then
-		curl -fsSL "$1" -o "$2"
+		curl -fsSL --connect-timeout "$NET_TIMEOUT" \
+			--speed-limit "$MIN_SPEED" --speed-time "$STALL_SECONDS" -o "$2" "$1"
 	else
-		wget -q "$1" -O "$2"
+		wget -q -T "$NET_TIMEOUT" -t 1 -O "$2" "$1"
 	fi
+}
+
+# 依次尝试官方地址与各镜像前缀，任一成功即返回 0。
+#   $1 原始 URL；$2 输出文件（省略则把正文写到 stdout）；$3 正文必须匹配的正则（用于跳过镜像的错误页）
+fetch_github() {
+	_source_url="$1"
+	_out_file="${2-}"
+	_must_match="${3-}"
+	for _prefix in "" $MIRRORS; do
+		_prefix="${_prefix%/}"
+		_url="$_source_url"
+		if [ -n "$_prefix" ]; then
+			_url="$_prefix/$_source_url"
+			echo "镜像加速: $_prefix" >&2
+		fi
+		if [ -n "$_out_file" ]; then
+			download "$_url" "$_out_file" || continue
+		else
+			_body="$(fetch_stdout "$_url")" || continue
+			if [ -n "$_must_match" ] && ! printf '%s\n' "$_body" | grep -q "$_must_match"; then
+				continue
+			fi
+			printf '%s\n' "$_body"
+		fi
+		return 0
+	done
+	return 1
 }
 
 case "$(uname -s)" in
@@ -48,10 +90,22 @@ aarch64 | arm64) arch="arm64" ;;
 *) die "不支持的架构: $arch（仅提供 linux/amd64、linux/arm64）" ;;
 esac
 
-if [ -z "$VERSION" ]; then
-	tag="$(fetch_stdout "https://api.github.com/repos/$REPO/releases/latest" |
+# 解析最新版本标签：优先 GitHub API；不可用时退回 releases/latest 页面（镜像上更常见）。
+latest_tag() {
+	_body="$(fetch_github "https://api.github.com/repos/$REPO/releases/latest" "" '"tag_name"')" || _body=""
+	tag="$(printf '%s\n' "$_body" |
 		sed -n 's/.*"tag_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -n 1)"
-	[ -n "$tag" ] || die "无法获取最新版本；请用 VERSION=v1.0.0 指定版本"
+	if [ -z "$tag" ]; then
+		_body="$(fetch_github "https://github.com/$REPO/releases/latest" "" 'releases/tag/v')" || return 1
+		tag="$(printf '%s\n' "$_body" |
+			sed -n 's|.*releases/tag/\(v[^"/]*\).*|\1|p' | head -n 1)"
+	fi
+	[ -n "$tag" ] || return 1
+	printf '%s\n' "$tag"
+}
+
+if [ -z "$VERSION" ]; then
+	tag="$(latest_tag)" || die "无法获取最新版本；请用 VERSION=v1.0.0 指定版本"
 else
 	tag="$VERSION"
 	case "$tag" in
@@ -68,9 +122,11 @@ tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT INT TERM
 
 echo "下载 $asset（$tag）..."
-download "$url" "$tmp/$asset" || die "下载失败: $url"
+fetch_github "$url" "$tmp/$asset" ||
+	die "下载失败: $url（可改用 VERSION=v1.1.0 指定版本，或检查网络）"
 
-if download "https://github.com/$REPO/releases/download/$tag/checksums.txt" "$tmp/checksums.txt" 2>/dev/null; then
+# checksums.txt 与二进制来自同一批源，SHA256 只能拦传输损坏，不能防镜像本身投毒。
+if fetch_github "https://github.com/$REPO/releases/download/$tag/checksums.txt" "$tmp/checksums.txt" 2>/dev/null; then
 	expected="$(awk -v a="$asset" '$2 == a { print $1; exit }' "$tmp/checksums.txt")"
 	if [ -z "$expected" ]; then
 		echo "警告: checksums.txt 中没有 $asset，跳过校验" >&2
