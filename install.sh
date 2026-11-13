@@ -4,12 +4,14 @@
 #   curl -fsSL https://raw.githubusercontent.com/lixiangzhong/efw/main/install.sh | sh
 #   curl -fsSL https://raw.githubusercontent.com/lixiangzhong/efw/main/install.sh | VERSION=v1.0.0 sh
 #   curl -fsSL https://raw.githubusercontent.com/lixiangzhong/efw/main/install.sh | BINDIR="$HOME/.local/bin" sh
+#   curl -fsSL https://raw.githubusercontent.com/lixiangzhong/efw/main/install.sh | SKIP_NFT_CHECK=1 sh
 #   wget -qO- https://raw.githubusercontent.com/lixiangzhong/efw/main/install.sh | sh
 #
 # 国内网络：官方地址连不上时自动改用下面的镜像前缀重试。
 #   curl -fsSL https://gh-proxy.com/https://raw.githubusercontent.com/lixiangzhong/efw/main/install.sh | sh
 #
 # 仅支持 Linux（amd64 / arm64），默认安装到 /usr/local/bin/efw。
+# 安装前会检查 nft：命令缺失直接中止，root 下还会验证内核 nf_tables；SKIP_NFT_CHECK=1 跳过该预检。
 set -eu
 
 REPO="lixiangzhong/efw"
@@ -32,6 +34,25 @@ die() {
 }
 
 command -v curl >/dev/null 2>&1 || command -v wget >/dev/null 2>&1 || die "需要 curl 或 wget"
+
+# 安装前预检：nft 命令必须存在；root 下再用只读的 `nft list ruleset` 验证内核 nf_tables 可用。
+# 非 root 无法验证内核，仅告警；SKIP_NFT_CHECK=1 跳过全部预检。
+check_nft() {
+	if [ "${SKIP_NFT_CHECK:-0}" = "1" ]; then
+		echo "已跳过 nft 预检（SKIP_NFT_CHECK=1）" >&2
+		return 0
+	fi
+	# Debian 系把 nft 装在 /usr/sbin，非 root 的 PATH 常不含它，这里补查常见路径。
+	nft_bin="$(PATH="$PATH:/usr/sbin:/sbin" command -v nft || true)"
+	[ -n "$nft_bin" ] ||
+		die "未找到 nft 命令；请先安装 nftables（Debian/Ubuntu: apt install nftables，RHEL 系: dnf install nftables），或用 SKIP_NFT_CHECK=1 跳过预检"
+	if [ "$(id -u)" -ne 0 ]; then
+		echo "警告: 非 root，无法验证内核 nf_tables，跳过内核检查" >&2
+		return 0
+	fi
+	"$nft_bin" list ruleset >/dev/null 2>&1 ||
+		die "无法使用 nftables（内核未启用 nf_tables，或当前命名空间缺少 CAP_NET_ADMIN）；用 SKIP_NFT_CHECK=1 可跳过预检"
+}
 
 fetch_stdout() {
 	if command -v curl >/dev/null 2>&1; then
@@ -89,6 +110,8 @@ x86_64 | amd64) arch="amd64" ;;
 aarch64 | arm64) arch="arm64" ;;
 *) die "不支持的架构: $arch（仅提供 linux/amd64、linux/arm64）" ;;
 esac
+
+check_nft
 
 # 解析最新版本标签：优先 GitHub API；不可用时退回 releases/latest 页面（镜像上更常见）。
 latest_tag() {
