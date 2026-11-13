@@ -20,7 +20,7 @@ wget -qO- https://raw.githubusercontent.com/lixiangzhong/efw/main/install.sh | s
 
 ```bash
 # 指定版本 / 安装目录
-curl -fsSL https://raw.githubusercontent.com/lixiangzhong/efw/main/install.sh | VERSION=v1.0.0 sh
+curl -fsSL https://raw.githubusercontent.com/lixiangzhong/efw/main/install.sh | VERSION=v1.1.0 sh
 curl -fsSL https://raw.githubusercontent.com/lixiangzhong/efw/main/install.sh | BINDIR="$HOME/.local/bin" sh
 ```
 
