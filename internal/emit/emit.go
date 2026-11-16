@@ -86,7 +86,15 @@ func Render(f *ir.File, plan optimize.Plan, opts Options) []byte {
 	b.WriteString("\n")
 
 	fmt.Fprintf(&b, "%stable inet %s {\n", indentTable, opts.Table)
-	for _, set := range plan.Sets {
+	sets := append([]optimize.Set(nil), plan.Sets...)
+	if usesPrivate(plan) {
+		sets = append(sets,
+			optimize.Set{Name: ir.Private4SetName, Kind: optimize.KindIPv4, Elements: ir.Private4Prefixes},
+			optimize.Set{Name: ir.Private6SetName, Kind: optimize.KindIPv6, Elements: ir.Private6Prefixes},
+		)
+		sort.Slice(sets, func(i, j int) bool { return sets[i].Name < sets[j].Name })
+	}
+	for _, set := range sets {
 		renderSet(&b, set)
 	}
 
@@ -158,12 +166,38 @@ func renderRule(b *strings.Builder, r optimize.Rule, logPrefix string, unreachab
 }
 
 // ruleTexts 返回一条规则对应的产物文本。
-// forward 链有两类拆分约束（否则内核中 ct original proto-dst 会变成 invalid type）：
+// private 是独立源地址规则，固定展开 v4/v6 两条；
+// forward 链另有两类端口拆分约束（否则内核中 ct original proto-dst 会变成 invalid type）：
 //   - 协议省略 + 端口：拆成 tcp/udp 两条（proto-dst 需要显式单协议上下文）；
 //   - 端口为多个内联值/范围：拆成每条一个值/范围（内联集合 + proto-dst 无效，命名 set 有效）。
 func ruleTexts(r optimize.Rule, logPrefix string, forward bool) []string {
+	if hasPrivate(r) {
+		return []string{
+			ruleText(r, logPrefix, forward, ir.FamilyIPv4),
+			ruleText(r, logPrefix, forward, ir.FamilyIPv6),
+		}
+	}
+	return familyRuleTexts(r, logPrefix, forward, ir.FamilyAny)
+}
+
+// hasPrivate 报告规则是否用 private 作为源地址。
+func hasPrivate(r optimize.Rule) bool {
+	return r.Src.Named == ir.PrivateName
+}
+
+// usesPrivate 报告产物是否需要 private4/private6 集合。
+func usesPrivate(plan optimize.Plan) bool {
+	for _, r := range plan.Rules {
+		if hasPrivate(r) {
+			return true
+		}
+	}
+	return false
+}
+
+func familyRuleTexts(r optimize.Rule, logPrefix string, forward bool, family ir.Family) []string {
 	if !forward {
-		return []string{ruleText(r, logPrefix, forward)}
+		return []string{ruleText(r, logPrefix, forward, family)}
 	}
 	protos := []ir.Proto{r.Proto}
 	if r.Proto == ir.ProtoAny && !r.Ports.IsAny() {
@@ -175,19 +209,19 @@ func ruleTexts(r optimize.Rule, logPrefix string, forward bool) []string {
 		rule.Proto = proto
 		// 命名 set 在 forward 侧有效；单值/单范围可内联；多个内联范围必须拆。
 		if rule.Ports.SetName != "" || len(rule.Ports.Ranges) <= 1 {
-			texts = append(texts, ruleText(rule, logPrefix, forward))
+			texts = append(texts, ruleText(rule, logPrefix, forward, family))
 			continue
 		}
 		for _, portRange := range rule.Ports.Ranges {
 			one := rule
 			one.Ports = optimize.Ports{Ranges: []ir.PortRange{portRange}}
-			texts = append(texts, ruleText(one, logPrefix, forward))
+			texts = append(texts, ruleText(one, logPrefix, forward, family))
 		}
 	}
 	return texts
 }
 
-func ruleText(r optimize.Rule, logPrefix string, forward bool) string {
+func ruleText(r optimize.Rule, logPrefix string, forward bool, family ir.Family) string {
 	parts := make([]string, 0, 8)
 	if forward {
 		parts = append(parts, "ct status dnat")
@@ -196,13 +230,13 @@ func ruleText(r optimize.Rule, logPrefix string, forward bool) string {
 		parts = append(parts, ifaceExpr(r.Iface))
 	}
 	if !r.Src.Any {
-		parts = append(parts, addressExpr("saddr", r.Src))
+		parts = append(parts, addressExpr("saddr", r.Src, family))
 	}
 	if !r.Dst.Any {
 		if forward {
-			parts = append(parts, originalDstExpr(r.Dst))
+			parts = append(parts, originalDstExpr(r.Dst, family))
 		} else {
-			parts = append(parts, addressExpr("daddr", r.Dst))
+			parts = append(parts, addressExpr("daddr", r.Dst, family))
 		}
 	}
 	if forward {
@@ -220,27 +254,33 @@ func ruleText(r optimize.Rule, logPrefix string, forward bool) string {
 }
 
 // originalDstExpr 在 forward 链中按 DNAT 前的目的地址匹配（发布地址语义）。
-func originalDstExpr(a optimize.Address) string {
-	family := "ip"
+func originalDstExpr(a optimize.Address, family ir.Family) string {
+	fam := "ip"
 	if a.Family == ir.FamilyIPv6 {
-		family = "ip6"
+		fam = "ip6"
 	}
 	if a.SetName != "" {
-		return fmt.Sprintf("ct original %s daddr @%s", family, a.SetName)
+		return fmt.Sprintf("ct original %s daddr @%s", fam, a.SetName)
 	}
-	return fmt.Sprintf("ct original %s daddr %s", family, a.Value)
+	return fmt.Sprintf("ct original %s daddr %s", fam, a.Value)
 }
 
-// addressExpr 生成地址匹配表达式。
-func addressExpr(direction string, a optimize.Address) string {
-	family := "ip"
+// addressExpr 生成地址匹配表达式；family 用于 private 源地址的地址族展开。
+func addressExpr(direction string, a optimize.Address, family ir.Family) string {
+	if a.Named == ir.PrivateName {
+		if family == ir.FamilyIPv6 {
+			return fmt.Sprintf("ip6 %s @%s", direction, ir.Private6SetName)
+		}
+		return fmt.Sprintf("ip %s @%s", direction, ir.Private4SetName)
+	}
+	fam := "ip"
 	if a.Family == ir.FamilyIPv6 {
-		family = "ip6"
+		fam = "ip6"
 	}
 	if a.SetName != "" {
-		return fmt.Sprintf("%s %s @%s", family, direction, a.SetName)
+		return fmt.Sprintf("%s %s @%s", fam, direction, a.SetName)
 	}
-	return fmt.Sprintf("%s %s %s", family, direction, a.Value)
+	return fmt.Sprintf("%s %s %s", fam, direction, a.Value)
 }
 
 // ifaceExpr 生成入口网卡匹配（按名字匹配，避免编译机与目标机的网卡索引差异）。
@@ -354,9 +394,9 @@ func portsExpr(p optimize.Ports) string {
 
 func setType(kind string) string {
 	switch kind {
-	case "ipv4":
+	case optimize.KindIPv4:
 		return "ipv4_addr"
-	case "ipv6":
+	case optimize.KindIPv6:
 		return "ipv6_addr"
 	default:
 		return "inet_service"

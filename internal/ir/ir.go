@@ -110,23 +110,41 @@ func (p Proto) IsICMP() bool {
 	return p == ProtoICMP || p == ProtoICMP4 || p == ProtoICMP6
 }
 
-// Addr 是地址选择器：Any 为 *，否则 Family + 规范化后的 IP/CIDR 文本。
+// PrivateName 是「局域网私有地址」集合的保留 token：RFC1918（IPv4）与 RFC4193（IPv6 ULA）。
+const (
+	PrivateName     = "private"
+	Private4SetName = "private4"
+	Private6SetName = "private6"
+)
+
+var (
+	// Private4Prefixes 是 RFC1918 定义的三段 IPv4 私有地址。
+	Private4Prefixes = []string{"10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"}
+	// Private6Prefixes 是 RFC4193 定义的 IPv6 唯一本地地址（ULA）。
+	Private6Prefixes = []string{"fc00::/7"}
+)
+
+// Addr 是地址选择器：Any 为 *，Named 为命名集合引用，否则 Family + 规范化后的 IP/CIDR 文本。
 type Addr struct {
 	Any    bool
 	Family Family
 	Value  string
+	Named  string // 命名集合引用（如 private）；非空时 Value 为空
 }
 
 // Key 返回用于比较的规范文本。
 func (a Addr) Key() string {
+	if a.Named != "" {
+		return "@" + a.Named
+	}
 	if a.Any {
 		return "*"
 	}
 	return a.Value
 }
 
-// HasFamily 表示地址是否限定了具体地址族。
-func (a Addr) HasFamily() bool { return !a.Any }
+// HasFamily 表示地址是否限定了具体地址族；命名集合（private）同时覆盖 v4/v6，不算限定。
+func (a Addr) HasFamily() bool { return !a.Any && a.Named == "" }
 
 // PortRange 是闭区间端口。
 type PortRange struct{ Lo, Hi uint16 }

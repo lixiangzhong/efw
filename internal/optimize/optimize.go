@@ -13,9 +13,9 @@ import (
 )
 
 const (
-	kindIPv4    = "ipv4"
-	kindIPv6    = "ipv6"
-	kindService = "svc"
+	KindIPv4    = "ipv4"
+	KindIPv6    = "ipv6"
+	KindService = "svc"
 
 	// hashMask 保证 set 名中的哈希固定为 8 位十六进制。
 	hashMask uint64 = 0xffffffff
@@ -26,6 +26,7 @@ type Address struct {
 	Any     bool
 	Family  ir.Family
 	Value   string
+	Named   string // 命名集合引用（如 private）
 	SetName string
 }
 
@@ -135,6 +136,10 @@ func mergeableDim(a, b ir.Rule) dimension {
 	if a.Iface != b.Iface {
 		return dimNone
 	}
+	// 命名集合（如 private）不参与归集：避免把 "@private" 当成 set 元素。
+	if a.Src.Named != "" || b.Src.Named != "" || a.Dst.Named != "" || b.Dst.Named != "" {
+		return dimNone
+	}
 	diffSrc := !addrEqual(a.Src, b.Src)
 	diffDst := !addrEqual(a.Dst, b.Dst)
 	diffPorts := a.Ports.Key() != b.Ports.Key()
@@ -182,6 +187,9 @@ func canMerge(base, cand ir.Rule, dim dimension) bool {
 	if base.Iface != cand.Iface {
 		return false
 	}
+	if base.Src.Named != "" || cand.Src.Named != "" || base.Dst.Named != "" || cand.Dst.Named != "" {
+		return false
+	}
 	switch dim {
 	case dimSrc:
 		return addrEqual(base.Dst, cand.Dst) &&
@@ -210,11 +218,15 @@ func buildSingle(r ir.Rule) Rule {
 	}
 	if r.Src.Any {
 		out.Src = Address{Any: true}
+	} else if r.Src.Named != "" {
+		out.Src = Address{Family: r.Src.Family, Named: r.Src.Named}
 	} else {
 		out.Src = Address{Family: r.Src.Family, Value: r.Src.Value}
 	}
 	if r.Dst.Any {
 		out.Dst = Address{Any: true}
+	} else if r.Dst.Named != "" {
+		out.Dst = Address{Family: r.Dst.Family, Named: r.Dst.Named}
 	} else {
 		out.Dst = Address{Family: r.Dst.Family, Value: r.Dst.Value}
 	}
@@ -256,8 +268,8 @@ func buildMerged(group []ir.Rule, dim dimension, sets map[string]Set) Rule {
 		for i, rr := range ranges {
 			elements[i] = rr.String()
 		}
-		name := MakeSetName(kindService, elements)
-		sets[name] = Set{Name: name, Kind: kindService, Elements: elements}
+		name := MakeSetName(KindService, elements)
+		sets[name] = Set{Name: name, Kind: KindService, Elements: elements}
 		out.Ports = Ports{SetName: name}
 	}
 	return out
@@ -279,6 +291,9 @@ func addrElements(group []ir.Rule, pick func(ir.Rule) ir.Addr) []string {
 }
 
 func addrEqual(a, b ir.Addr) bool {
+	if a.Named != "" || b.Named != "" {
+		return a.Any == b.Any && a.Named == b.Named
+	}
 	if a.Any != b.Any {
 		return false
 	}
@@ -290,9 +305,9 @@ func addrEqual(a, b ir.Addr) bool {
 
 func kindOfFamily(f ir.Family) string {
 	if f == ir.FamilyIPv6 {
-		return kindIPv6
+		return KindIPv6
 	}
-	return kindIPv4
+	return KindIPv4
 }
 
 // MakeSetName 按元素内容生成确定性 set 名：s_<kind>_<hash8>。
