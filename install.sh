@@ -2,7 +2,7 @@
 # efw Linux 一键安装脚本
 #
 #   curl -fsSL https://raw.githubusercontent.com/lixiangzhong/efw/main/install.sh | sh
-#   curl -fsSL https://raw.githubusercontent.com/lixiangzhong/efw/main/install.sh | VERSION=v1.1.0 sh
+#   curl -fsSL https://raw.githubusercontent.com/lixiangzhong/efw/main/install.sh | VERSION=v1.2.0 sh
 #   curl -fsSL https://raw.githubusercontent.com/lixiangzhong/efw/main/install.sh | BINDIR="$HOME/.local/bin" sh
 #   curl -fsSL https://raw.githubusercontent.com/lixiangzhong/efw/main/install.sh | SKIP_NFT_CHECK=1 sh
 #   wget -qO- https://raw.githubusercontent.com/lixiangzhong/efw/main/install.sh | sh
@@ -128,7 +128,7 @@ latest_tag() {
 }
 
 if [ -z "$VERSION" ]; then
-	tag="$(latest_tag)" || die "无法获取最新版本；请用 VERSION=v1.1.0 指定版本"
+	tag="$(latest_tag)" || die "无法获取最新版本；请用 VERSION=v1.2.0 指定版本"
 else
 	tag="$VERSION"
 	case "$tag" in
@@ -146,7 +146,7 @@ trap 'rm -rf "$tmp"' EXIT INT TERM
 
 echo "下载 $asset（$tag）..."
 fetch_github "$url" "$tmp/$asset" ||
-	die "下载失败: $url（可改用 VERSION=v1.1.0 指定版本，或检查网络）"
+	die "下载失败: $url（可改用 VERSION=v1.2.0 指定版本，或检查网络）"
 
 # checksums.txt 与二进制来自同一批源，SHA256 只能拦传输损坏，不能防镜像本身投毒。
 if fetch_github "https://github.com/$REPO/releases/download/$tag/checksums.txt" "$tmp/checksums.txt" 2>/dev/null; then
