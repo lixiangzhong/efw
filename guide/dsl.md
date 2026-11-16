@@ -7,6 +7,7 @@
 | 字段 | 取值 |
 |:--|:--|
 | `src` / `dst` | IPv4/IPv6 字面量、CIDR、`*` |
+| `iface` | 入口网卡名（独立规则：`accept { iface eth0 }`；≤15 字符） |
 | `proto` | `tcp`、`udp`、`icmp`（双栈）；`tcp4`/`tcp6`/`udp4`/`udp6`/`icmp4`/`icmp6`（单栈）；省略 = 任意协议 |
 | `port` | `80`、`80-90`、`80,443` 或 `{80,443}`（等价）、`*`（省略 = 任意端口） |
 | `action` | 由块头决定：`accept`、`drop`、`reject`；块内 `log` 为修饰（log + 块动作），无单独 log |
@@ -29,6 +30,8 @@ accept {
     tcp 1.1.1.8 -> 80             # 协议也可以放在任意位置
     tcp4 1.1.1.9 -> 80            # 仅 IPv4 TCP
     tcp6 2001:db8::9 -> 80        # 仅 IPv6 TCP
+    iface eth0                    # 该入口网卡上的全部流量（动作由块头决定）
+    iface eth1 log                # 同上，并记录日志
 
     # 源为 * 且没有目的地址时，`* ->` 可省略：
     tcp4 80                       # = * -> tcp4 80（对所有 IPv4 来源）
@@ -44,6 +47,8 @@ accept {
 ```
 
 纯数字一律视为端口（`-> 2001` 是端口 2001），不做地址猜测；含冒号的串仍是地址。
+
+`iface` 是独立整卡规则：`iface <网卡名> [log]`，匹配该入口网卡上的全部流量，生成 `iifname "<name>"`；input 与 forward 链都生效（forward 侧即该入口网卡上的 DNAT 流量）。它**不能与 src/dst/proto/port 组合**。名称只允许字母/数字/`_.@-`，长度 1-15；编译时不校验网卡是否存在。`input` 链首默认生成 `iifname "lo" accept`，因此本机访问自身地址不需要在 ACL 里写自己的 IP。
 
 ## 动作块（块内省略 action）
 

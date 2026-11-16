@@ -4,7 +4,7 @@
 
 - 默认纯离线编译；`efw apply` 编译后直接原子应用到内核，重复执行即覆盖。
 - 覆盖入站（`input`）与 Docker 发布端口（`forward`，仅 DNAT 流量），`table inet` 双栈。
-- **只拦截外部来源**：默认放行 loopback/CGNAT/link-local 与 IPv6 ULA/link-local，RFC1918 默认不放；有 Docker 时 `apply` 自动探测并放行其网段。
+- **只拦截外部来源**：默认放行 loopback/CGNAT/link-local 与 IPv6 ULA/link-local，RFC1918 默认不放；有 Docker 时 `apply` 自动探测并放行其网段。`input` 链首默认放行 `lo`；需要整卡放行/拒绝时写独立规则 `iface <网卡名>`。
 
 设计细节、错误码与验收标准见本地 SPEC.md（不纳入版本库），本文只讲怎么用。
 
@@ -109,12 +109,14 @@ v6-bootstrap auto|off              # 默认 auto：兜底为 drop/reject 时放�
 accept { <规则> }                  # 块内省略 action，继承块动作
 drop { <规则> }                    # 同上（reject 同理）
 accept { * } / drop { * }          # 兜底：匹配一切，必须最后一条（可简写为 accept / drop）
+iface <name> [log]                 # 整卡规则：该入口网卡上的全部流量（动作继承块头）
 # <规则> = [proto] src [proto] -> [dst] [port]    # proto 可出现在匹配部分任意位置
 ```
 
 | 字段 | 取值 |
 |:--|:--|
 | `src` / `dst` | IPv4/IPv6 字面量、CIDR、`*` |
+| `iface` | 入口网卡名（`eth0`、`ens3`；独立成规则 `iface eth0`，≤15 字符） |
 | `proto` | `tcp`、`udp`、`icmp`（双栈）；`tcp4`/`tcp6`/`udp4`/`udp6`/`icmp4`/`icmp6`（单栈）；省略 = 任意协议 |
 | `port` | `80`、`80-90`、`80,443`（或 `{80,443}`）、`*`；一律指目的端口 |
 | `action` | 由块头决定；块内 `log` 是修饰（log + 块动作），无单独 log |
@@ -127,6 +129,7 @@ accept {
     1.1.1.4 -> 8080          # 指定端口
     1.1.1.5 -> {80, 443}     # 端口列表
     tcp4 1.1.1.11 -> 80      # 仅 IPv4 TCP
+    iface eth0               # 仅从 eth0 进入的全部流量
     tcp4 80                  # = * -> tcp4 80（所有 IPv4 来源）
 }
 ```
@@ -138,6 +141,7 @@ IPv6 带端口写成 `[2001:db8::1]:443`；纯数字一律视为端口（`-> 200
 efw 在 input/forward 两条链的**最前面**自动放行「本机 / 非 RFC1918」来源；**RFC1918 默认不放行**。Docker 存在时 `apply` 自动把其子网加入放行集合（`compile` 不探测环境，保持确定性）。
 
 - 没有 Docker 又需要内网访问，要在 ACL 里显式写内网网段。
+- `input` 链首默认放行 `lo`：本机访问自身公网/内网地址不受 ACL 影响；如需整卡放行/拒绝，用独立规则 `iface <网卡名>`（不能与源/端口组合）。
 - 伪造来源仍可能被放行；`rp_filter=0` 时建议开启反向路径过滤。
 - 完整语义、apply 流程与 Docker 发布端口见 [部署说明](guide/deploy.md)。
 
