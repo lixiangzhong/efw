@@ -160,6 +160,7 @@ func (p PortSet) Key() string {
 type Rule struct {
 	Line    int
 	Raw     string
+	Iface   string // 入口网卡名（iifname）；空 = 任意网卡
 	Src     Addr
 	Dst     Addr
 	Proto   Proto
@@ -171,7 +172,7 @@ type Rule struct {
 
 // MatchKey 只覆盖匹配条件，用于判断两条规则是否匹配同一流量。
 func (r Rule) MatchKey() string {
-	return strings.Join([]string{r.Src.Key(), r.Dst.Key(), r.Proto.String(), r.Ports.Key()}, "|")
+	return strings.Join([]string{r.Iface, r.Src.Key(), r.Dst.Key(), r.Proto.String(), r.Ports.Key()}, "|")
 }
 
 // ActionKey 覆盖动作语义（含 log 状态），用于判断两条规则动作是否等价。
@@ -192,7 +193,7 @@ type File struct {
 
 // MatchesAll 报告规则是否匹配一切（用于识别兜底规则）。
 func (r Rule) MatchesAll() bool {
-	return r.Src.Any && r.Dst.Any && r.Proto == ProtoAny && r.Ports.IsAny()
+	return r.Iface == "" && r.Src.Any && r.Dst.Any && r.Proto == ProtoAny && r.Ports.IsAny()
 }
 
 // Fallback 返回兜底规则的动作与是否存在。

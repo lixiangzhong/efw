@@ -42,6 +42,7 @@ func (p Ports) IsAny() bool { return p.SetName == "" && len(p.Ranges) == 0 }
 type Rule struct {
 	Lines   []int
 	Raws    []string
+	Iface   string // 入口网卡名；空 = 任意网卡
 	Src     Address
 	Dst     Address
 	Proto   ir.Proto
@@ -130,6 +131,10 @@ func mergeableDim(a, b ir.Rule) dimension {
 	if !actionEqual(a, b) {
 		return dimNone
 	}
+	// 网卡是独立匹配维度，不参与 set 归集：不同 iface 不能合并。
+	if a.Iface != b.Iface {
+		return dimNone
+	}
 	diffSrc := !addrEqual(a.Src, b.Src)
 	diffDst := !addrEqual(a.Dst, b.Dst)
 	diffPorts := a.Ports.Key() != b.Ports.Key()
@@ -174,6 +179,9 @@ func canMerge(base, cand ir.Rule, dim dimension) bool {
 	if !actionEqual(base, cand) {
 		return false
 	}
+	if base.Iface != cand.Iface {
+		return false
+	}
 	switch dim {
 	case dimSrc:
 		return addrEqual(base.Dst, cand.Dst) &&
@@ -194,6 +202,7 @@ func buildSingle(r ir.Rule) Rule {
 	out := Rule{
 		Lines:   []int{r.Line},
 		Raws:    []string{r.Raw},
+		Iface:   r.Iface,
 		Proto:   r.Proto,
 		Log:     r.Log,
 		LogOnly: r.LogOnly,

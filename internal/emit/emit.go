@@ -107,6 +107,10 @@ func renderChain(b *strings.Builder, f *ir.File, plan optimize.Plan, opts Option
 	if forward {
 		fmt.Fprintf(b, "%s# 说明: 本链只匹配 DNAT 转发流量（如 Docker 发布端口）\n\n", indentChain)
 	}
+	if !forward {
+		fmt.Fprintf(b, "%s# auto: 本机回环放行（本机访问自身地址也走 lo）\n", indentChain)
+		fmt.Fprintf(b, "%siifname \"lo\" accept\n\n", indentChain)
+	}
 	internal4, internal6 := internalSourceSets(opts.DockerNets)
 	fmt.Fprintf(b, "%s# auto: 本机/CGNAT/link-local 来源放行（RFC1918 默认不放；Docker 网段按 apply 探测）\n", indentChain)
 	fmt.Fprintf(b, "%sip saddr %s accept\n", indentChain, internal4)
@@ -187,6 +191,9 @@ func ruleText(r optimize.Rule, logPrefix string, forward bool) string {
 	if forward {
 		parts = append(parts, "ct status dnat")
 	}
+	if r.Iface != "" {
+		parts = append(parts, ifaceExpr(r.Iface))
+	}
 	if !r.Src.Any {
 		parts = append(parts, addressExpr("saddr", r.Src))
 	}
@@ -223,6 +230,7 @@ func originalDstExpr(a optimize.Address) string {
 	return fmt.Sprintf("ct original %s daddr %s", family, a.Value)
 }
 
+// addressExpr 生成地址匹配表达式。
 func addressExpr(direction string, a optimize.Address) string {
 	family := "ip"
 	if a.Family == ir.FamilyIPv6 {
@@ -234,6 +242,12 @@ func addressExpr(direction string, a optimize.Address) string {
 	return fmt.Sprintf("%s %s %s", family, direction, a.Value)
 }
 
+// ifaceExpr 生成入口网卡匹配（按名字匹配，避免编译机与目标机的网卡索引差异）。
+func ifaceExpr(name string) string {
+	return fmt.Sprintf("iifname %q", name)
+}
+
+// protoExpr 生成协议/端口匹配表达式。
 func protoExpr(r optimize.Rule) []string {
 	switch r.Proto {
 	case ir.ProtoTCP:

@@ -24,6 +24,9 @@ const utf8BOM = "\xef\xbb\xbf"
 // portItemRe 匹配单个端口项（80 或 80-90）。
 var portItemRe = regexp.MustCompile(`^[0-9]+(-[0-9]+)?$`)
 
+// ifaceNameRe 校验网卡名：Linux 网卡名上限 15 字节，允许字母/数字/_.@-。
+var ifaceNameRe = regexp.MustCompile(`^[A-Za-z0-9_.@-]{1,15}$`)
+
 // directiveNames 是文件头指令名。
 var directiveNames = map[string]struct{}{
 	"established":  {},
@@ -199,6 +202,8 @@ func (p *parser) parseTopLine(lineNo int, rawLine, text string) {
 			return
 		}
 		p.syntaxErr(lineNo, "单独 log 已移除：请写成 log drop / log accept，或放进动作块")
+	case first == "iface":
+		p.syntaxErr(lineNo, "iface 规则必须写在动作块内（如 accept { iface eth0 }）")
 	default:
 		p.syntaxErr(lineNo, "规则必须写在动作块内（如 accept { ... } / drop { ... } / reject { ... }）")
 	}
@@ -223,7 +228,7 @@ func (p *parser) parseStandaloneAction(lineNo int, rawLine string, fields []stri
 		p.syntaxErr(lineNo, "%q 不是合法动作（accept|drop|reject）", fields[idx])
 		return
 	}
-	p.appendRule(lineNo, rawLine, ir.Addr{Any: true}, ir.Addr{Any: true}, ir.ProtoAny, ir.PortSet{}, log, false, verdict)
+	p.appendRule(lineNo, rawLine, "", ir.Addr{Any: true}, ir.Addr{Any: true}, ir.ProtoAny, ir.PortSet{}, log, false, verdict)
 }
 
 func (p *parser) parseDirective(lineNo int, fields []string) {
@@ -353,18 +358,27 @@ func (p *parser) parseRuleWithArrow(lineNo int, text string, blockVerdict ir.Ver
 		p.syntaxErr(lineNo, "缺少源地址")
 		return parts, false
 	}
-	proto, lhsTokens, found, ok := p.extractProtoTokens(lineNo, lhsTokens, ir.ProtoAny, false)
+	if hasIfaceToken(lhsTokens) || hasIfaceToken(matchTokens) {
+		p.syntaxErr(lineNo, "iface 只能单独写成规则（如 `accept { iface eth0 }`），不能与其他匹配条件组合")
+		return parts, false
+	}
+
+	proto, lhsTokens, protoFound, ok := p.extractProtoTokens(lineNo, lhsTokens, ir.ProtoAny, false)
 	if !ok {
 		return parts, false
 	}
-	proto, matchTokens, _, ok = p.extractProtoTokens(lineNo, matchTokens, proto, found)
+	proto, matchTokens, _, ok = p.extractProtoTokens(lineNo, matchTokens, proto, protoFound)
 	if !ok {
 		return parts, false
 	}
 	parts.proto = proto
 
+	if len(lhsTokens) == 0 {
+		p.syntaxErr(lineNo, "缺少源地址（隐式 * 源请写 *）")
+		return parts, false
+	}
 	if len(lhsTokens) != 1 {
-		p.syntaxErr(lineNo, "源地址只能有一个 token（协议请单独写）")
+		p.syntaxErr(lineNo, "源地址只能有一个 token（协议 / iface 请单独写）")
 		return parts, false
 	}
 	src, ok := p.parseSrcToken(lineNo, lhsTokens[0])
@@ -394,6 +408,10 @@ func (p *parser) parseBlockRule(lineNo int, rawLine, text string) {
 		p.semanticErr(lineNo, "动作行不能出现在块内（块内规则只写匹配条件；兜底写 `*`）")
 		return
 	}
+	if first == "iface" {
+		p.parseIfaceRule(lineNo, rawLine, text, verdict)
+		return
+	}
 
 	arrow := strings.Index(text, "->")
 	if arrow < 0 {
@@ -407,7 +425,47 @@ func (p *parser) parseBlockRule(lineNo int, rawLine, text string) {
 	if !p.checkFamilies(lineNo, parts.src, parts.dst) {
 		return
 	}
-	p.appendRule(lineNo, rawLine, parts.src, parts.dst, parts.proto, parts.ports, parts.log, parts.logOnly, parts.verdict)
+	p.appendRule(lineNo, rawLine, "", parts.src, parts.dst, parts.proto, parts.ports, parts.log, parts.logOnly, parts.verdict)
+	p.block.rules++
+}
+
+// parseIfaceRule 解析独立规则 `iface <网卡名> [log]`：匹配该入口网卡上的全部流量。
+// iface 不支持与其他匹配条件组合（简化为「整块网卡」语义）。
+func (p *parser) parseIfaceRule(lineNo int, rawLine, text string, verdict ir.Verdict) {
+	fields := splitRuleFields(text)
+	if len(fields) < 2 {
+		p.syntaxErr(lineNo, "iface 后面缺少网卡名")
+		return
+	}
+	name := fields[1]
+	if !ifaceNameRe.MatchString(name) {
+		p.semanticErr(lineNo, "网卡名 %q 不合法（允许字母/数字/_.@-，长度 1-15）", name)
+		return
+	}
+
+	rest := fields[2:]
+	log := false
+	if n := len(rest); n > 0 {
+		if strings.EqualFold(rest[n-1], "log") {
+			log = true
+			rest = rest[:n-1]
+		} else if v, ok := parseVerdict(rest[n-1]); ok {
+			if v != verdict {
+				p.semanticErr(lineNo, "块内规则动作必须与块头一致（块为 %s）", verdict)
+				return
+			}
+			rest = rest[:n-1]
+			if len(rest) > 0 && strings.EqualFold(rest[len(rest)-1], "log") {
+				log = true
+				rest = rest[:len(rest)-1]
+			}
+		}
+	}
+	if len(rest) > 0 {
+		p.syntaxErr(lineNo, "iface 规则只支持 `iface <网卡名> [log]`，不能与其他匹配条件组合")
+		return
+	}
+	p.appendRule(lineNo, rawLine, name, ir.Addr{Any: true}, ir.Addr{Any: true}, ir.ProtoAny, ir.PortSet{}, log, false, verdict)
 	p.block.rules++
 }
 
@@ -434,6 +492,10 @@ func (p *parser) parseBlockShortRule(lineNo int, rawLine, text string, verdict i
 		}
 	}
 	matchTokens := mergePortListFragments(fields[:n])
+	if hasIfaceToken(matchTokens) {
+		p.syntaxErr(lineNo, "iface 只能单独写成规则（如 `accept { iface eth0 }`），不能与其他匹配条件组合")
+		return
+	}
 	proto, rest, _, ok := p.extractProtoTokens(lineNo, matchTokens, ir.ProtoAny, false)
 	if !ok {
 		return
@@ -444,7 +506,7 @@ func (p *parser) parseBlockShortRule(lineNo int, rawLine, text string, verdict i
 		if !ok {
 			return
 		}
-		p.appendRule(lineNo, rawLine, ir.Addr{Any: true}, dst, proto, ports, log, false, verdict)
+		p.appendRule(lineNo, rawLine, "", ir.Addr{Any: true}, dst, proto, ports, log, false, verdict)
 		p.block.rules++
 		return
 	}
@@ -454,7 +516,7 @@ func (p *parser) parseBlockShortRule(lineNo int, rawLine, text string, verdict i
 			p.syntaxErr(lineNo, "块内无箭头写法缺少匹配部分")
 			return
 		}
-		p.appendRule(lineNo, rawLine, ir.Addr{Any: true}, ir.Addr{Any: true}, proto, ir.PortSet{}, log, false, verdict)
+		p.appendRule(lineNo, rawLine, "", ir.Addr{Any: true}, ir.Addr{Any: true}, proto, ir.PortSet{}, log, false, verdict)
 		p.block.rules++
 		return
 	}
@@ -466,7 +528,7 @@ func (p *parser) parseBlockShortRule(lineNo int, rawLine, text string, verdict i
 	if !ok {
 		return
 	}
-	p.appendRule(lineNo, rawLine, src, ir.Addr{Any: true}, proto, ir.PortSet{}, log, false, verdict)
+	p.appendRule(lineNo, rawLine, "", src, ir.Addr{Any: true}, proto, ir.PortSet{}, log, false, verdict)
 	p.block.rules++
 }
 
@@ -539,6 +601,16 @@ func (p *parser) extractProtoTokens(lineNo int, tokens []string, proto ir.Proto,
 		out = append(out, tok)
 	}
 	return proto, out, found, true
+}
+
+// hasIfaceToken 报告 tokens 中是否出现 iface 关键字（只允许独立规则形式）。
+func hasIfaceToken(tokens []string) bool {
+	for _, tok := range tokens {
+		if strings.EqualFold(tok, "iface") {
+			return true
+		}
+	}
+	return false
 }
 
 // mergePortListFragments 把被空白拆开的裸端口列表片段拼回去（80, 443 → 80,443）。
@@ -724,10 +796,11 @@ func (p *parser) parsePorts(lineNo int, raw string) (ir.PortSet, bool) {
 	return ir.PortSet{Ranges: ir.MergePortRanges(ranges)}, true
 }
 
-func (p *parser) appendRule(lineNo int, rawLine string, src, dst ir.Addr, proto ir.Proto, ports ir.PortSet, log, logOnly bool, verdict ir.Verdict) {
+func (p *parser) appendRule(lineNo int, rawLine, iface string, src, dst ir.Addr, proto ir.Proto, ports ir.PortSet, log, logOnly bool, verdict ir.Verdict) {
 	p.file.Rules = append(p.file.Rules, ir.Rule{
 		Line:    lineNo,
 		Raw:     rawLine,
+		Iface:   iface,
 		Src:     src,
 		Dst:     dst,
 		Proto:   proto,

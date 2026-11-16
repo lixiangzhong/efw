@@ -1,0 +1,6 @@
+accept {
+  iface eth0
+  iface eth1 log
+}
+
+drop
