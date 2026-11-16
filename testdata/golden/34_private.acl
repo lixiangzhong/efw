@@ -1,0 +1,6 @@
+accept {
+  private
+  tcp 1.1.1.1 -> 22
+}
+
+drop

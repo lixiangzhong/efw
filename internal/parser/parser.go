@@ -408,6 +408,10 @@ func (p *parser) parseBlockRule(lineNo int, rawLine, text string) {
 		p.semanticErr(lineNo, "动作行不能出现在块内（块内规则只写匹配条件；兜底写 `*`）")
 		return
 	}
+	if first == ir.PrivateName {
+		p.parsePrivateRule(lineNo, rawLine, text, verdict)
+		return
+	}
 	if first == "iface" {
 		p.parseIfaceRule(lineNo, rawLine, text, verdict)
 		return
@@ -426,6 +430,37 @@ func (p *parser) parseBlockRule(lineNo int, rawLine, text string) {
 		return
 	}
 	p.appendRule(lineNo, rawLine, "", parts.src, parts.dst, parts.proto, parts.ports, parts.log, parts.logOnly, parts.verdict)
+	p.block.rules++
+}
+
+// parsePrivateRule 解析独立规则 `private [log]`：匹配私有源地址（RFC1918 + RFC4193 ULA）上的全部流量。
+// private 只能单独成行，不支持与目的地址/协议/端口组合。
+func (p *parser) parsePrivateRule(lineNo int, rawLine, text string, verdict ir.Verdict) {
+	fields := splitRuleFields(text)
+	rest := fields[1:]
+	log := false
+	if n := len(rest); n > 0 {
+		if strings.EqualFold(rest[n-1], "log") {
+			log = true
+			rest = rest[:n-1]
+		} else if v, ok := parseVerdict(rest[n-1]); ok {
+			if v != verdict {
+				p.semanticErr(lineNo, "块内规则动作必须与块头一致（块为 %s）", verdict)
+				return
+			}
+			rest = rest[:n-1]
+			if len(rest) > 0 && strings.EqualFold(rest[len(rest)-1], "log") {
+				log = true
+				rest = rest[:len(rest)-1]
+			}
+		}
+	}
+	if len(rest) > 0 {
+		p.syntaxErr(lineNo, "private 只能单独成行（表示私有源地址）")
+		return
+	}
+	src := ir.Addr{Family: ir.FamilyAny, Named: ir.PrivateName}
+	p.appendRule(lineNo, rawLine, "", src, ir.Addr{Any: true}, ir.ProtoAny, ir.PortSet{}, log, false, verdict)
 	p.block.rules++
 }
 
@@ -629,6 +664,10 @@ func mergePortListFragments(tokens []string) []string {
 
 // parseSrcToken 解析源地址（不允许带端口）。
 func (p *parser) parseSrcToken(lineNo int, raw string) (ir.Addr, bool) {
+	if strings.EqualFold(raw, ir.PrivateName) {
+		p.semanticErr(lineNo, "private 只能单独成行（表示私有源地址），不能与其他匹配条件组合")
+		return ir.Addr{}, false
+	}
 	if strings.Contains(raw, "://") {
 		p.syntaxErr(lineNo, "`://` 语法已移除：协议请写成独立 token（如 `tcp 1.1.1.1 -> 80`）")
 		return ir.Addr{}, false
@@ -695,6 +734,10 @@ func (p *parser) parseRhsMatchTokens(lineNo int, tokens []string) (ir.Addr, ir.P
 func (p *parser) classifyToken(lineNo int, raw string) (tokenKind, ir.Addr, ir.PortSet, bool) {
 	if strings.Contains(raw, "://") {
 		p.syntaxErr(lineNo, "`://` 语法已移除：协议请写成独立 token，目的地址直接写（如 `tcp 10.0.0.1:80`）")
+		return tokenAddr, ir.Addr{}, ir.PortSet{}, false
+	}
+	if strings.EqualFold(raw, ir.PrivateName) || strings.HasPrefix(strings.ToLower(raw), ir.PrivateName+":") {
+		p.semanticErr(lineNo, "private 只能单独成行（表示私有源地址），不能作为目的地址")
 		return tokenAddr, ir.Addr{}, ir.PortSet{}, false
 	}
 	if strings.HasPrefix(raw, "[") {
