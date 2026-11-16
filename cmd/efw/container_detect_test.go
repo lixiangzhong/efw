@@ -81,7 +81,7 @@ func TestDetectContainerNets(t *testing.T) {
 
 	t.Run("docker 探测并去重", func(t *testing.T) {
 		dir := writeFakeRuntimes(t, map[string]string{"docker": fakeDockerScript})
-		t.Setenv("PATH", dir+":/bin:/usr/bin")
+		t.Setenv("PATH", dir)
 		nets := detectContainerNets(io.Discard, true)
 		want := []string{"172.17.0.0/16", "fd00:dead::/64"}
 		if !slices.Equal(nets, want) {
@@ -91,7 +91,7 @@ func TestDetectContainerNets(t *testing.T) {
 
 	t.Run("podman netavark", func(t *testing.T) {
 		dir := writeFakeRuntimes(t, map[string]string{"podman": fakePodmanScript})
-		t.Setenv("PATH", dir+":/bin:/usr/bin")
+		t.Setenv("PATH", dir)
 		nets := detectContainerNets(io.Discard, true)
 		want := []string{"10.88.0.0/16", "fd00:beef::/64"}
 		if !slices.Equal(nets, want) {
@@ -101,7 +101,7 @@ func TestDetectContainerNets(t *testing.T) {
 
 	t.Run("podman CNI", func(t *testing.T) {
 		dir := writeFakeRuntimes(t, map[string]string{"podman": fakePodmanCNIScript})
-		t.Setenv("PATH", dir+":/bin:/usr/bin")
+		t.Setenv("PATH", dir)
 		nets := detectContainerNets(io.Discard, true)
 		want := []string{"10.88.0.0/16"}
 		if !slices.Equal(nets, want) {
@@ -111,7 +111,7 @@ func TestDetectContainerNets(t *testing.T) {
 
 	t.Run("docker 与 podman 合并去重排序", func(t *testing.T) {
 		dir := writeFakeRuntimes(t, map[string]string{"docker": fakeDockerScript, "podman": fakePodmanScript})
-		t.Setenv("PATH", dir+":/bin:/usr/bin")
+		t.Setenv("PATH", dir)
 		nets := detectContainerNets(io.Discard, true)
 		want := []string{"10.88.0.0/16", "172.17.0.0/16", "fd00:beef::/64", "fd00:dead::/64"}
 		if !slices.Equal(nets, want) {
@@ -121,7 +121,7 @@ func TestDetectContainerNets(t *testing.T) {
 
 	t.Run("单个运行时失败只告警", func(t *testing.T) {
 		dir := writeFakeRuntimes(t, map[string]string{"docker": fakeBrokenScript, "podman": fakePodmanScript})
-		t.Setenv("PATH", dir+":/bin:/usr/bin")
+		t.Setenv("PATH", dir)
 		var stderr bytes.Buffer
 		nets := detectContainerNets(&stderr, false)
 		want := []string{"10.88.0.0/16", "fd00:beef::/64"}
@@ -135,7 +135,7 @@ func TestDetectContainerNets(t *testing.T) {
 
 	t.Run("inspect 失败只告警", func(t *testing.T) {
 		dir := writeFakeRuntimes(t, map[string]string{"podman": fakeInspectFailScript})
-		t.Setenv("PATH", dir+":/bin:/usr/bin")
+		t.Setenv("PATH", dir)
 		var stderr bytes.Buffer
 		if nets := detectContainerNets(&stderr, false); len(nets) != 0 {
 			t.Fatalf("探测失败应返回空，实际: %v", nets)
@@ -147,7 +147,7 @@ func TestDetectContainerNets(t *testing.T) {
 
 	t.Run("inspect 输出非 JSON 只告警", func(t *testing.T) {
 		dir := writeFakeRuntimes(t, map[string]string{"docker": fakeBadJSONScript})
-		t.Setenv("PATH", dir+":/bin:/usr/bin")
+		t.Setenv("PATH", dir)
 		var stderr bytes.Buffer
 		if nets := detectContainerNets(&stderr, false); len(nets) != 0 {
 			t.Fatalf("解析失败应返回空，实际: %v", nets)
@@ -159,7 +159,7 @@ func TestDetectContainerNets(t *testing.T) {
 
 	t.Run("quiet 抑制告警", func(t *testing.T) {
 		dir := writeFakeRuntimes(t, map[string]string{"podman": fakeBrokenScript})
-		t.Setenv("PATH", dir+":/bin:/usr/bin")
+		t.Setenv("PATH", dir)
 		var stderr bytes.Buffer
 		if nets := detectContainerNets(&stderr, true); len(nets) != 0 {
 			t.Fatalf("探测失败应返回空，实际: %v", nets)

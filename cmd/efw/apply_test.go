@@ -41,12 +41,23 @@ type fakeNft struct {
 	log string
 }
 
-// newFakeNft 创建 fake nft，并把测试进程的 PATH 指向它。
+// emptyRuntimeScript 是测试用空运行时：不输出任何网络，避免 CI runner 上的
+// 真实 docker/podman 被探测到，导致测试结果依赖环境。
+const emptyRuntimeScript = `#!/bin/sh
+exit 0
+`
+
+// newFakeNft 创建 fake nft，并把测试进程的 PATH 指向它；同时用空运行时遮住真实 docker/podman。
 func newFakeNft(t *testing.T) fakeNft {
 	t.Helper()
 	dir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(dir, "nft"), []byte(fakeNftScript), 0o755); err != nil {
 		t.Fatal(err)
+	}
+	for _, name := range []string{"docker", "podman"} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(emptyRuntimeScript), 0o755); err != nil {
+			t.Fatal(err)
+		}
 	}
 	logPath := filepath.Join(dir, "calls.log")
 	t.Setenv("PATH", dir+":/bin:/usr/bin")
