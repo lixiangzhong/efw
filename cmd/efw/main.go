@@ -4,6 +4,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -252,22 +253,22 @@ func readSource(opts compileOptions, positional []string, stdin io.Reader) (stri
 }
 
 // buildCompiled 读取 DSL 并完成编译，告警写到 stderr。
-func buildCompiled(opts compileOptions, priority string, positional []string, stdin io.Reader, stderr io.Writer, dockerNets []string) (compileResult, error) {
+func buildCompiled(opts compileOptions, priority string, positional []string, stdin io.Reader, stderr io.Writer, containerNets []string) (compileResult, error) {
 	source, src, err := readSource(opts, positional, stdin)
 	if err != nil {
 		return compileResult{}, err
 	}
 	ruleset, warns, compileErr := compiler.Compile(src, compiler.Options{
-		Table:      opts.table,
-		Chain:      opts.chain,
-		Hook:       strings.ToLower(opts.hook),
-		Priority:   priority,
-		LogPrefix:  opts.logPrefix,
-		Version:    version,
-		Source:     source,
-		Stamp:      opts.stamp,
-		Now:        time.Now(),
-		DockerNets: dockerNets,
+		Table:         opts.table,
+		Chain:         opts.chain,
+		Hook:          strings.ToLower(opts.hook),
+		Priority:      priority,
+		LogPrefix:     opts.logPrefix,
+		Version:       version,
+		Source:        source,
+		Stamp:         opts.stamp,
+		Now:           time.Now(),
+		ContainerNets: containerNets,
 	})
 	if !opts.quiet {
 		for _, warn := range warns {
@@ -330,64 +331,123 @@ func applyAction(cmd *cli.Command, positional []string, stdin io.Reader, stderr 
 	if optErr != nil {
 		return &commandError{code: 2, lines: []string{optErr.Format()}}
 	}
-	dockerNets := detectDockerNets(stderr, opts.quiet)
-	result, err := buildCompiled(opts, priority, positional, stdin, stderr, dockerNets)
+	containerNets := detectContainerNets(stderr, opts.quiet)
+	result, err := buildCompiled(opts, priority, positional, stdin, stderr, containerNets)
 	if err != nil {
 		return err
 	}
 	return applyRuleset(result.ruleset, opts.table)
 }
 
-// detectDockerNets 在 apply 时探测本机 Docker 网络子网，追加到内网来源放行集合。
-// 没有 docker 命令时返回 nil；docker 存在但探测失败时告警并返回 nil（不阻断 apply）。
-func detectDockerNets(stderr io.Writer, quiet bool) []string {
-	docker, err := exec.LookPath("docker")
-	if err != nil {
-		return nil
-	}
-	out, err := exec.Command(docker, "network", "ls", "--format", "{{.ID}}").Output()
-	if err != nil {
-		if !quiet {
-			fmt.Fprintf(stderr, "efw: 警告: 检测到 docker 但无法列出网络，跳过 Docker 网段：%v\n", err)
-		}
-		return nil
-	}
-	ids := strings.Fields(string(out))
-	if len(ids) == 0 {
-		return nil
-	}
-	args := append([]string{
-		"network", "inspect", "--format",
-		`{{range .IPAM.Config}}{{.Subnet}}{{"\n"}}{{end}}`,
-	}, ids...)
-	out, err = exec.Command(docker, args...).Output()
-	if err != nil {
-		if !quiet {
-			fmt.Fprintf(stderr, "efw: 警告: 无法读取 docker 网络子网，跳过 Docker 网段：%v\n", err)
-		}
-		return nil
-	}
-	seen := make(map[string]struct{})
+// containerRuntimes 是 apply 时探测的容器运行时；装多个时合并各自网段。
+var containerRuntimes = []string{"docker", "podman"}
+
+// detectContainerNets 在 apply 时探测本机容器运行时（Docker/Podman）的网络子网，
+// 追加到内网来源放行集合。运行时未安装时跳过；已安装但探测失败时告警并跳过该运行时（不阻断 apply）。
+func detectContainerNets(stderr io.Writer, quiet bool) []string {
 	var nets []string
-	for _, line := range strings.Split(string(out), "\n") {
-		line = strings.TrimSpace(line)
-		if line == "" {
+	for _, name := range containerRuntimes {
+		bin, err := exec.LookPath(name)
+		if err != nil {
 			continue
 		}
-		if _, parseErr := netip.ParsePrefix(line); parseErr != nil {
+		found, probeErr := probeNetworkNets(bin)
+		if probeErr != nil {
 			if !quiet {
-				fmt.Fprintf(stderr, "efw: 警告: 忽略无法解析的 Docker 网段 %q\n", line)
+				fmt.Fprintf(stderr, "efw: 警告: %s 网络探测失败，跳过其网段：%v\n", name, probeErr)
 			}
 			continue
 		}
-		if _, ok := seen[line]; ok {
+		nets = append(nets, found...)
+	}
+	return normalizeNets(nets, stderr, quiet)
+}
+
+// probeNetworkNets 读取一个运行时的全部网络子网：先 `network ls -q` 取标识
+// （Docker 是 ID，Podman 是网络名，两者都可直接作为 inspect 参数），再一次性取回 JSON。
+func probeNetworkNets(bin string) ([]string, error) {
+	out, err := exec.Command(bin, "network", "ls", "-q").Output()
+	if err != nil {
+		return nil, fmt.Errorf("无法列出网络：%w", err)
+	}
+	ids := strings.Fields(string(out))
+	if len(ids) == 0 {
+		return nil, nil
+	}
+	out, err = exec.Command(bin, append([]string{"network", "inspect"}, ids...)...).Output()
+	if err != nil {
+		return nil, fmt.Errorf("无法读取网络子网：%w", err)
+	}
+	var networks []networkInspect
+	if err := json.Unmarshal(out, &networks); err != nil {
+		return nil, fmt.Errorf("无法解析网络信息：%w", err)
+	}
+	var nets []string
+	for _, network := range networks {
+		for _, config := range network.IPAM.Config {
+			nets = append(nets, config.Subnet)
+		}
+		for _, subnet := range network.Subnets {
+			nets = append(nets, subnet.Subnet)
+		}
+		for _, plugin := range network.Plugins {
+			for _, ranges := range plugin.IPAM.Ranges {
+				for _, item := range ranges {
+					nets = append(nets, item.Subnet)
+				}
+			}
+		}
+	}
+	return nets, nil
+}
+
+// networkInspect 只保留三种输出形状中的子网字段：
+//   - Docker：IPAM.Config[].Subnet
+//   - Podman/netavark：Subnets[].Subnet
+//   - Podman/CNI（3.x）：Plugins[].IPAM.Ranges[][].Subnet
+//
+// JSON 键大小写不敏感，Docker 的 "Subnet" 与 Podman 的 "subnet" 共用同一个标签。
+type networkInspect struct {
+	IPAM struct {
+		Config []struct {
+			Subnet string `json:"subnet"`
+		} `json:"config"`
+	} `json:"ipam"`
+	Subnets []struct {
+		Subnet string `json:"subnet"`
+	} `json:"subnets"`
+	Plugins []struct {
+		IPAM struct {
+			Ranges [][]struct {
+				Subnet string `json:"subnet"`
+			} `json:"ranges"`
+		} `json:"ipam"`
+	} `json:"plugins"`
+}
+
+// normalizeNets 校验探测到的子网：忽略非法值、去重并排序，保证产物确定性。
+func normalizeNets(nets []string, stderr io.Writer, quiet bool) []string {
+	seen := make(map[string]struct{}, len(nets))
+	valid := make([]string, 0, len(nets))
+	for _, net := range nets {
+		net = strings.TrimSpace(net)
+		if net == "" {
 			continue
 		}
-		seen[line] = struct{}{}
-		nets = append(nets, line)
+		if _, err := netip.ParsePrefix(net); err != nil {
+			if !quiet {
+				fmt.Fprintf(stderr, "efw: 警告: 忽略无法解析的容器网段 %q\n", net)
+			}
+			continue
+		}
+		if _, ok := seen[net]; ok {
+			continue
+		}
+		seen[net] = struct{}{}
+		valid = append(valid, net)
 	}
-	sort.Strings(nets)
-	return nets
+	sort.Strings(valid)
+	return valid
 }
 
 // applyRuleset 校验后原子替换 table：

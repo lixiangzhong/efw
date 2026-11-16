@@ -25,8 +25,8 @@ type Options struct {
 	Source    string
 	Stamp     bool
 	Now       time.Time
-	// DockerNets 是 apply 时探测到的 Docker 网络子网（compile 不填）。
-	DockerNets []string
+	// ContainerNets 是 apply 时探测到的容器运行时（Docker/Podman）网络子网（compile 不填）。
+	ContainerNets []string
 }
 
 // Compile 把 DSL 文本编译为完整 nftables ruleset。
@@ -60,7 +60,7 @@ func Compile(src []byte, opts Options) ([]byte, []errs.Warning, error) {
 		Source:           opts.Source,
 		Stamp:            opts.Stamp,
 		Now:              opts.Now,
-		DockerNets:       opts.DockerNets,
+		ContainerNets:    opts.ContainerNets,
 		UnreachableLines: unreachable,
 	})
 	return out, warns, nil
