@@ -3,8 +3,8 @@
 把一套面向 ACL 的 DSL 编译成**完整、可直接 `nft -f` 加载**的 nftables ruleset。
 
 - 默认纯离线编译；`efw apply` 编译后直接原子应用到内核，重复执行即覆盖。
-- 覆盖入站（`input`）与 Docker 发布端口（`forward`，仅 DNAT 流量），`table inet` 双栈。
-- **只拦截外部来源**：默认放行 loopback/CGNAT/link-local 与 IPv6 ULA/link-local，RFC1918 默认不放；有 Docker 时 `apply` 自动探测并放行其网段。`input` 链首默认放行 `lo`；需要整卡放行/拒绝时写独立规则 `iface <网卡名>`。
+- 覆盖入站（`input`）与容器发布端口（`forward`，仅 DNAT 流量，Docker/Podman），`table inet` 双栈。
+- **只拦截外部来源**：默认放行 loopback/CGNAT/link-local 与 IPv6 ULA/link-local，RFC1918 默认不放；有 Docker/Podman（rootful）时 `apply` 自动探测并放行其网段。`input` 链首默认放行 `lo`；需要整卡放行/拒绝时写独立规则 `iface <网卡名>`。
 
 设计细节、错误码与验收标准见本地 SPEC.md（不纳入版本库），本文只讲怎么用。
 
@@ -138,15 +138,15 @@ IPv6 带端口写成 `[2001:db8::1]:443`；纯数字一律视为端口（`-> 200
 
 ## 安全默认
 
-efw 在 input/forward 两条链的**最前面**自动放行「本机 / 非 RFC1918」来源；**RFC1918 默认不放行**。Docker 存在时 `apply` 自动把其子网加入放行集合（`compile` 不探测环境，保持确定性）。
+efw 在 input/forward 两条链的**最前面**自动放行「本机 / 非 RFC1918」来源；**RFC1918 默认不放行**。Docker/Podman（rootful）存在时 `apply` 自动把其子网加入放行集合（`compile` 不探测环境，保持确定性）。
 
-- 没有 Docker 又需要内网访问，要在 ACL 里显式写内网网段。
+- 没有 Docker/Podman 又需要内网访问，要在 ACL 里显式写内网网段。
 - `input` 链首默认放行 `lo`：本机访问自身公网/内网地址不受 ACL 影响；如需整卡放行/拒绝，用独立规则 `iface <网卡名>`（不能与源/端口组合）。
 - 伪造来源仍可能被放行；`rp_filter=0` 时建议开启反向路径过滤。
-- 完整语义、apply 流程与 Docker 发布端口见 [部署说明](guide/deploy.md)。
+- 完整语义、apply 流程与容器发布端口见 [部署说明](guide/deploy.md)。
 
 ## 文档
 
 - [DSL 参考](guide/dsl.md)：语法、简写、动作块与边界
-- [部署说明](guide/deploy.md)：部署参数、apply、内网来源、Docker forward
+- [部署说明](guide/deploy.md)：部署参数、apply、内网来源、容器 forward
 - [开发与发布](guide/development.md)：Actions 发布流程、测试、v1 不做

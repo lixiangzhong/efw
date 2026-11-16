@@ -17,13 +17,13 @@ const (
 	indentSetField = "        "
 	indentChain    = "        "
 
-	// forwardChainName/forwardPriority：内置 Docker 转发链（仅匹配 DNAT 流量）。
+	// forwardChainName/forwardPriority：内置容器转发链（仅匹配 DNAT 流量）。
 	forwardChainName = "forward"
 	forwardPriority  = "-10"
 )
 
 // baseInternal4/baseInternal6 是默认放行的本机/非 RFC1918 来源。
-// RFC1918（10/8、172.16/12、192.168/16）默认不放行；Docker 网段由 apply 探测后追加。
+// RFC1918（10/8、172.16/12、192.168/16）默认不放行；容器运行时网段由 apply 探测后追加。
 var (
 	baseInternal4 = []string{"100.64.0.0/10", "127.0.0.0/8", "169.254.0.0/16"}
 	baseInternal6 = []string{"::1", "fc00::/7", "fe80::/10"}
@@ -40,20 +40,21 @@ type Options struct {
 	Source    string
 	Stamp     bool
 	Now       time.Time
-	// DockerNets 是 apply 时探测到的 Docker 网络子网，追加到内网来源放行集合。
-	DockerNets []string
+	// ContainerNets 是 apply 时探测到的容器运行时（Docker/Podman）网络子网，
+	// 追加到内网来源放行集合。
+	ContainerNets []string
 	// UnreachableLines 是 W1 告警涉及的行号，产物中会加 unreachable 注释。
 	UnreachableLines map[int]bool
 }
 
 // internalSourceSets 生成 input/forward 最前面的来源放行集合：
 // 默认含 CGNAT/loopback/link-local 与 IPv6 ULA/link-local/回环；
-// RFC1918 不默认放行，只有 Docker 探测到的子网会追加。
-func internalSourceSets(dockerNets []string) (string, string) {
+// RFC1918 不默认放行，只有容器运行时探测到的子网会追加。
+func internalSourceSets(containerNets []string) (string, string) {
 	v4 := append([]string(nil), baseInternal4...)
 	v6 := append([]string(nil), baseInternal6...)
-	seen := make(map[string]struct{}, len(dockerNets))
-	for _, net := range dockerNets {
+	seen := make(map[string]struct{}, len(containerNets))
+	for _, net := range containerNets {
 		if _, ok := seen[net]; ok {
 			continue
 		}
@@ -105,14 +106,14 @@ func renderChain(b *strings.Builder, f *ir.File, plan optimize.Plan, opts Option
 	b.WriteString("\n")
 
 	if forward {
-		fmt.Fprintf(b, "%s# 说明: 本链只匹配 DNAT 转发流量（如 Docker 发布端口）\n\n", indentChain)
+		fmt.Fprintf(b, "%s# 说明: 本链只匹配 DNAT 转发流量（如容器发布端口）\n\n", indentChain)
 	}
 	if !forward {
 		fmt.Fprintf(b, "%s# auto: 本机回环放行（本机访问自身地址也走 lo）\n", indentChain)
 		fmt.Fprintf(b, "%siifname \"lo\" accept\n\n", indentChain)
 	}
-	internal4, internal6 := internalSourceSets(opts.DockerNets)
-	fmt.Fprintf(b, "%s# auto: 本机/CGNAT/link-local 来源放行（RFC1918 默认不放；Docker 网段按 apply 探测）\n", indentChain)
+	internal4, internal6 := internalSourceSets(opts.ContainerNets)
+	fmt.Fprintf(b, "%s# auto: 本机/CGNAT/link-local 来源放行（RFC1918 默认不放；容器网段按 apply 探测）\n", indentChain)
 	fmt.Fprintf(b, "%sip saddr %s accept\n", indentChain, internal4)
 	fmt.Fprintf(b, "%sip6 saddr %s accept\n\n", indentChain, internal6)
 	if f.Established {
