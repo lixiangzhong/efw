@@ -18,7 +18,6 @@ efw compile \
 | `--chain` | `input` | chain 名，不能是 nft 关键字；也不能是 `forward` / `postrouting`（与内置链冲突） |
 | `--hook` | `input` | v1 仅支持 input |
 | `--priority` | `filter` | `raw`/`mangle`/`filter`/`security`/`dstnat`/`srcnat` 或 32 位整数（关键字统一小写） |
-| `--compat` | 关 | 生成 nft <1.0（如 CentOS 7 的 0.8）兼容产物：数字 priority、拆分 `th dport`、禁用 masquerade；`apply` 未显式指定时按 `nft --version` 自动判定 |
 | `--log-prefix` | `"efw: "` | 原样输出；非空，不得含引号/反斜杠/控制字符 |
 | `--stamp` | 关 | 产物头追加生成时间（会破坏确定性） |
 | `--quiet` | 关 | 抑制 warning |
@@ -45,7 +44,8 @@ cat rules.acl | efw apply      # stdin
 约束与边界：
 
 - 需要 root 或 `CAP_NET_ADMIN`；nft 缺失/权限不足/应用失败 → `E104`，exit 2。
-- **旧版 nft（<1.0）**：`apply` 自动识别 0.x 并生成兼容产物（数字 priority、省略协议的端口拆成 tcp/udp）；`compile` 需显式 `--compat`。`masquerade` 在 compat 下直接报 `E102`（inet 族 NAT 需内核 ≥5.2）。nft 0.8 的 `ct original` 实测可用。
+- **旧版 nft（<1.0）**：用独立命令 `efw-nft08`（`cmd/efw-nft08`），CLI 参数与 apply 流程相同，产物固定为 0.8 方言；`efw` 本身不再提供 `--compat`。`masquerade` 在 `efw-nft08` 下直接报 `E102`（inet 族 NAT 需内核 ≥5.2）。nft 0.8 的 `ct original` 实测可用。
+- `efw` 与 `efw-nft08` 共用 apply 传输层（`/dev/stdin`、`nft list tables`、含 `delete` 的最终批次校验），差异只在编译产物方言。
 - 只替换自己的 `table inet <table>`，不执行 `flush ruleset`，不碰容器运行时（Docker/Podman）的链；nft 批次是原子的，失败不会留下半套规则。
 - apply 不做自动备份——规则源文件就是唯一事实来源；`-o/--output` 只属于 `compile`，`apply` 不接受。
 - 与 `/etc/fw.sh` 的差异：efw 默认全局生效（可用独立 `iface <网卡名>` 规则按入口网卡整卡放行/拒绝），也不使用 ipset。
