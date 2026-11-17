@@ -1,5 +1,5 @@
 #!/bin/sh
-# efw Linux 一键安装脚本
+# efw Linux 一键安装脚本（官方 GitHub 直连）
 #
 #   curl -fsSL https://raw.githubusercontent.com/lixiangzhong/efw/main/install.sh | sh
 #   curl -fsSL https://raw.githubusercontent.com/lixiangzhong/efw/main/install.sh | VERSION=v1.4.0 sh
@@ -7,9 +7,7 @@
 #   curl -fsSL https://raw.githubusercontent.com/lixiangzhong/efw/main/install.sh | SKIP_NFT_CHECK=1 sh
 #   wget -qO- https://raw.githubusercontent.com/lixiangzhong/efw/main/install.sh | sh
 #
-# 国内网络：官方地址连不上时自动改用下面的镜像前缀重试。
-#   curl -fsSL https://gh-proxy.com/https://raw.githubusercontent.com/lixiangzhong/efw/main/install.sh | sh
-#
+# 本脚本只走 GitHub 官方地址；国内网络请用 install_cn.sh（内置镜像加速）。
 # 仅支持 Linux（amd64 / arm64），默认安装到 /usr/local/bin/efw。
 # 安装前会检查 nft：命令缺失直接中止，root 下还会验证内核 nf_tables；SKIP_NFT_CHECK=1 跳过该预检。
 set -eu
@@ -18,15 +16,8 @@ REPO="lixiangzhong/efw"
 BINDIR="${BINDIR:-/usr/local/bin}"
 VERSION="${VERSION:-}"
 
-# GitHub 加速前缀：每次下载都先试官方直连，失败后按顺序改用镜像重试。
-MIRRORS="https://gh-proxy.com https://ghfast.top https://ghproxy.net \
-	https://gh-proxy.org https://github.cnxiaobai.com https://gh.noki.eu.org"
-
-# 直连被墙时通常卡在 TCP 建连阶段，超时设短一些，尽快切到镜像。
-NET_TIMEOUT=6
-# 能连上但被限速/阻断时，低于 MIN_SPEED 持续 STALL_SECONDS 秒即放弃当前源。
-MIN_SPEED=1024
-STALL_SECONDS=20
+# 官方直连的超时；连不上就报错，不自动切镜像。
+NET_TIMEOUT=10
 
 die() {
 	echo "install.sh: $*" >&2
@@ -56,8 +47,7 @@ check_nft() {
 
 fetch_stdout() {
 	if command -v curl >/dev/null 2>&1; then
-		curl -fsSL --connect-timeout "$NET_TIMEOUT" \
-			--speed-limit "$MIN_SPEED" --speed-time "$STALL_SECONDS" "$1"
+		curl -fsSL --connect-timeout "$NET_TIMEOUT" "$1"
 	else
 		wget -q -T "$NET_TIMEOUT" -t 1 -O - "$1"
 	fi
@@ -65,38 +55,10 @@ fetch_stdout() {
 
 download() {
 	if command -v curl >/dev/null 2>&1; then
-		curl -fsSL --connect-timeout "$NET_TIMEOUT" \
-			--speed-limit "$MIN_SPEED" --speed-time "$STALL_SECONDS" -o "$2" "$1"
+		curl -fsSL --connect-timeout "$NET_TIMEOUT" -o "$2" "$1"
 	else
 		wget -q -T "$NET_TIMEOUT" -t 1 -O "$2" "$1"
 	fi
-}
-
-# 依次尝试官方地址与各镜像前缀，任一成功即返回 0。
-#   $1 原始 URL；$2 输出文件（省略则把正文写到 stdout）；$3 正文必须匹配的正则（用于跳过镜像的错误页）
-fetch_github() {
-	_source_url="$1"
-	_out_file="${2-}"
-	_must_match="${3-}"
-	for _prefix in "" $MIRRORS; do
-		_prefix="${_prefix%/}"
-		_url="$_source_url"
-		if [ -n "$_prefix" ]; then
-			_url="$_prefix/$_source_url"
-			echo "镜像加速: $_prefix" >&2
-		fi
-		if [ -n "$_out_file" ]; then
-			download "$_url" "$_out_file" || continue
-		else
-			_body="$(fetch_stdout "$_url")" || continue
-			if [ -n "$_must_match" ] && ! printf '%s\n' "$_body" | grep -q "$_must_match"; then
-				continue
-			fi
-			printf '%s\n' "$_body"
-		fi
-		return 0
-	done
-	return 1
 }
 
 case "$(uname -s)" in
@@ -108,18 +70,18 @@ arch="$(uname -m)"
 case "$arch" in
 x86_64 | amd64) arch="amd64" ;;
 aarch64 | arm64) arch="arm64" ;;
-*) die "不支持的架构: $arch（仅提供 linux/amd64、linux/arm64）" ;;
+*) die "不支持的架构: ${arch}（仅提供 linux/amd64、linux/arm64）" ;;
 esac
 
 check_nft
 
-# 解析最新版本标签：优先 GitHub API；不可用时退回 releases/latest 页面（镜像上更常见）。
+# 解析最新版本标签：优先 GitHub API；不可用时退回 releases/latest 页面。
 latest_tag() {
-	_body="$(fetch_github "https://api.github.com/repos/$REPO/releases/latest" "" '"tag_name"')" || _body=""
+	_body="$(fetch_stdout "https://api.github.com/repos/$REPO/releases/latest")" || _body=""
 	tag="$(printf '%s\n' "$_body" |
 		sed -n 's/.*"tag_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -n 1)"
 	if [ -z "$tag" ]; then
-		_body="$(fetch_github "https://github.com/$REPO/releases/latest" "" 'releases/tag/v')" || return 1
+		_body="$(fetch_stdout "https://github.com/$REPO/releases/latest")" || return 1
 		tag="$(printf '%s\n' "$_body" |
 			sed -n 's|.*releases/tag/\(v[^"/]*\).*|\1|p' | head -n 1)"
 	fi
@@ -140,7 +102,7 @@ fi
 # 严格校验版本格式，防止异常字符或路径穿越
 case "$tag" in
 v[0-9]*.[0-9]*) ;;
-*) die "版本格式非法: $tag（期望如 v1.4.0）" ;;
+*) die "版本格式非法: ${tag}（期望如 v1.4.0）" ;;
 esac
 case "$tag" in
 *[!A-Za-z0-9._-]*) die "版本包含非法字符: $tag" ;;
@@ -153,14 +115,14 @@ url="https://github.com/$REPO/releases/download/$tag/$asset"
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT INT TERM
 
-echo "下载 $asset（$tag）..."
-fetch_github "$url" "$tmp/$asset" ||
-	die "下载失败: $url（可改用 VERSION=v1.4.0 指定版本，或检查网络）"
+echo "下载 ${asset}（${tag}）..."
+download "$url" "$tmp/$asset" ||
+	die "下载失败: ${url}（可改用 VERSION=v1.4.0 指定版本，或检查网络；国内建议改用 install_cn.sh）"
 
 # 下载 checksums.txt 并验证二进制 SHA256，校验失败或无法获取必须中止，严禁降级静默安装。
 if [ "${SKIP_CHECKSUM:-0}" = "1" ]; then
 	echo "警告: 已跳过 SHA256 校验（SKIP_CHECKSUM=1）" >&2
-elif fetch_github "https://github.com/$REPO/releases/download/$tag/checksums.txt" "$tmp/checksums.txt" 2>/dev/null; then
+elif download "https://github.com/$REPO/releases/download/$tag/checksums.txt" "$tmp/checksums.txt" 2>/dev/null; then
 	expected="$(awk -v a="$asset" '$2 == a { print $1; exit }' "$tmp/checksums.txt")"
 	if [ -z "$expected" ]; then
 		die "checksums.txt 中未包含 $asset 校验和，中止安装（如确需跳过可用 SKIP_CHECKSUM=1）"
@@ -170,7 +132,7 @@ elif fetch_github "https://github.com/$REPO/releases/download/$tag/checksums.txt
 	else
 		actual="$(shasum -a 256 "$tmp/$asset" | awk '{print $1}')"
 	fi
-	[ "$actual" = "$expected" ] || die "SHA256 校验失败（期望: $expected，实际: $actual）"
+	[ "$actual" = "$expected" ] || die "SHA256 校验失败（期望: ${expected}，实际: ${actual}）"
 	echo "SHA256 校验通过"
 else
 	die "无法下载 checksums.txt，为保障安全已中止安装（如确需跳过可用 SKIP_CHECKSUM=1）"

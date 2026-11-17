@@ -26,15 +26,17 @@ curl -fsSL https://raw.githubusercontent.com/lixiangzhong/efw/main/install.sh | 
 
 脚本仅支持 Linux amd64/arm64，会校验 SHA256，安装完成后打印一份示例 ACL。安装前会检查 `nft`：命令缺失直接中止，root 下还会用 `nft list ruleset` 验证内核 nf_tables；`SKIP_NFT_CHECK=1` 可跳过预检。
 
+国内网络请改用 [`install_cn.sh`](install_cn.sh)（见下）。
+
 ### 国内网络
 
-`install.sh` 先直连 GitHub，失败后自动按内置前缀列表重试：`gh-proxy.com`、`ghfast.top`、`ghproxy.net`、`gh-proxy.org`、`github.cnxiaobai.com`、`gh.noki.eu.org`。脚本本身也打不开时经镜像获取：
+`install.sh` 只走 GitHub 官方地址。国内直连很慢，请改用 **`install_cn.sh`**：所有下载都经内置镜像前缀，**不尝试 GitHub 直连**。脚本本身也经镜像获取：
 
 ```bash
-curl -fsSL https://gh-proxy.com/https://raw.githubusercontent.com/lixiangzhong/efw/main/install.sh | sh
+curl -fsSL https://gh-proxy.com/https://raw.githubusercontent.com/lixiangzhong/efw/main/install_cn.sh | sh
 ```
 
-个别镜像只代理下载、不代理 `api.github.com`，版本探测失败时用 `VERSION=v1.4.0` 指定。SHA256 只能防传输损坏、无法防镜像投毒，介意请安装后与官方 Release 比对。
+镜像顺序：`gh-proxy.com`、`ghfast.top`、`ghproxy.net`、`gh-proxy.org`、`github.cnxiaobai.com`、`gh.noki.eu.org`。个别镜像不代理 `api.github.com`，版本探测失败时用 `VERSION=v1.4.0` 指定。SHA256 只能防传输损坏、无法防镜像投毒，介意请安装后与官方 Release 比对。
 
 从源码构建：
 
