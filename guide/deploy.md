@@ -18,6 +18,7 @@ efw compile \
 | `--chain` | `input` | chain 名，不能是 nft 关键字；也不能是 `forward` / `postrouting`（与内置链冲突） |
 | `--hook` | `input` | v1 仅支持 input |
 | `--priority` | `filter` | `raw`/`mangle`/`filter`/`security`/`dstnat`/`srcnat` 或 32 位整数（关键字统一小写） |
+| `--compat` | 关 | 生成 nft <1.0（如 CentOS 7 的 0.8）兼容产物：数字 priority、拆分 `th dport`、禁用 masquerade；`apply` 未显式指定时按 `nft --version` 自动判定 |
 | `--log-prefix` | `"efw: "` | 原样输出；非空，不得含引号/反斜杠/控制字符 |
 | `--stamp` | 关 | 产物头追加生成时间（会破坏确定性） |
 | `--quiet` | 关 | 抑制 warning |
@@ -37,13 +38,14 @@ cat rules.acl | efw apply      # stdin
 执行流程：
 
 1. 编译 DSL（告警照常输出到 stderr；编译错误 exit 1，不触碰内核）。
-2. `nft -c -f -` 校验生成的完整 ruleset。
-3. 探测 `table inet <table>`：已存在则在同一 `nft` 批次内 `delete table` + 新定义（原子替换，失败时旧表不变）；不存在则直接创建。
-4. 成功时静默（无状态输出，exit 0）；warning 与失败才写 stderr。
+2. 用 `nft list tables` 探测 `table inet <table>`：已存在则把 `delete table` 与新定义合成**同一批次**（原子替换）。
+3. 对该批次执行 `nft -c -f /dev/stdin` 校验（`/dev/stdin` 替代 `-f -`，兼容 0.8）；校验的是最终批次，二次 apply 不会因表已存在而误报。
+4. `nft -f` 应用同一批次；成功时静默（无状态输出，exit 0），失败时旧表不变，warning 与失败才写 stderr。
 
 约束与边界：
 
 - 需要 root 或 `CAP_NET_ADMIN`；nft 缺失/权限不足/应用失败 → `E104`，exit 2。
+- **旧版 nft（<1.0）**：`apply` 自动识别 0.x 并生成兼容产物（数字 priority、省略协议的端口拆成 tcp/udp）；`compile` 需显式 `--compat`。`masquerade` 在 compat 下直接报 `E102`（inet 族 NAT 需内核 ≥5.2）。nft 0.8 的 `ct original` 实测可用。
 - 只替换自己的 `table inet <table>`，不执行 `flush ruleset`，不碰容器运行时（Docker/Podman）的链；nft 批次是原子的，失败不会留下半套规则。
 - apply 不做自动备份——规则源文件就是唯一事实来源；`-o/--output` 只属于 `compile`，`apply` 不接受。
 - 与 `/etc/fw.sh` 的差异：efw 默认全局生效（可用独立 `iface <网卡名>` 规则按入口网卡整卡放行/拒绝），也不使用 ipset。
@@ -61,16 +63,15 @@ ip6 saddr { ::1, fc00::/7, fe80::/10 } accept
 
 - **默认放行 `lo`**：input 链首生成 `iifname "lo" accept`，本机访问自身公网/内网地址不再需要把自身 IP 写进 ACL；forward 链不生成（本机流量不经过 forward）。
 - **RFC1918（`10.0.0.0/8`、`172.16.0.0/12`、`192.168.0.0/16`）默认不放行**；需要内网访问时写 `private`（独立一行，私有源地址）或具体网段（例如 DB 客户端连本机 MariaDB）。
-- Docker 或 Podman（rootful）存在时，`efw apply` 执行 `network inspect` 读取本机所有容器网络的子网，追加到上述两组集合（IPv4/IPv6）；两者都存在时合并去重。运行时命令缺失则跳过，命令存在但网络不可用会告警并继续。
-- `compile` 不做环境探测，保持确定性；只有 `apply` / shebang 执行时才会自动加容器网段。
-- forward 侧放行**不带 `ct status dnat`**，所以容器→宿主发布端口（hairpin）也能放行；容器之间的直连本来就不经过这两条规则。
+- **容器来源不按网段放行**：efw 不再探测 Docker/Podman 网段；需要信任容器时在 ACL 显式写 `iface br-*`（Docker 自定义网络）和 `iface docker0`（默认 bridge），按入口网桥判定，Docker 换地址池也不受影响。
+- `iface` 生成 `iifname "<name>"`，input 与 forward 都生效；forward 侧是 `ct status dnat iifname "<name>"`，所以容器→宿主发布端口（hairpin）也能放行。
 - rootless Podman 没有宿主侧 DNAT（pasta/slirp4netns + 用户态端口转发）：发布端口由宿主进程监听，落在 input 链的端口 ACL 里；容器访问宿主服务的源地址是宿主地址或 loopback，若被拦需在 ACL 显式放行。
-- 需要按入口网卡整卡放行/拒绝时，单独写一条 `iface <网卡名>` 规则（生成 `iifname "<网卡名>"`，可加 `log`；不能与源/端口组合）；不写 iface 即不限定，多网卡/网卡改名都不影响。
+- 需要按入口网卡整卡放行/拒绝时，单独写一条 `iface <网卡名>` 规则（支持尾缀 `*` 通配，如 `iface br-*`；可加 `log`；不能与源/端口组合）；不写 iface 即不限定，多网卡/网卡改名都不影响。
 - 残余风险：伪造来源仍可能被放行；`rp_filter=0` 时建议开启反向路径过滤（`sysctl -w net.ipv4.conf.all.rp_filter=1`）。
 
 ## 容器发布端口（forward 链）
 
-Docker/Podman（rootful）的发布端口（`-p 8080:80`）走的是 **DNAT + FORWARD**，流量不会经过 INPUT。efw 默认同时生成两条链；容器网段由 `apply` 探测后在链首自动放行，其余外部来源进入下列过滤。ACL 里的 `-> 8080` 既允许宿主 8080，也允许所有 8080 的发布端口：
+Docker/Podman（rootful）的发布端口（`-p 8080:80`）走的是 **DNAT + FORWARD**，流量不会经过 INPUT。efw 默认同时生成两条链；容器来源由 ACL 的 `iface br-*` / `iface docker0` 显式信任，其余外部来源进入下列过滤。ACL 里的 `-> 8080` 既允许宿主 8080，也允许所有 8080 的发布端口：
 
 | 链 | hook / priority | 匹配语义 |
 |:--|:--|:--|
@@ -98,7 +99,7 @@ chain forward {
 - 不需要声明容器网段或容器 IP，端口直接写宿主发布端口；文件头 `forward off` 可关闭 forward 链，退回纯 input 行为。
 - `iface <网卡名>` 是独立整卡规则，在 input/forward 两条链都生效（forward 侧即该入口网卡上的 DNAT 流量）。
 - 已知边界：host 网络模式的容器、rootless Docker/Podman（无宿主 DNAT）、以及非容器运行时的 DNAT 端口转发也会落入 `ct status dnat` 的作用范围；容器之间的东西向流量不在其列。
-- 容器网段整段视为内部来源：efw 对它的放行不带 `ct status dnat`，但**不会改变运行时的隔离结论**——Docker/Netavark 的转发 drop 仍然生效（实测跨网络容器仍被 Docker 隔离拦截）。
+- 容器信任只看入口网桥：`iface br-*` 的放行在 forward 侧仍带 `ct status dnat`，**不会改变运行时的隔离结论**——Docker/Netavark 的转发 drop 仍然生效（实测跨网络容器仍被 Docker 隔离拦截）。
 
 ## 出站 NAT（masquerade）
 
@@ -121,14 +122,14 @@ chain postrouting {
 
 ## Podman 说明
 
-Podman 与 Docker 的差异集中在网络后端，对 efw 的影响只有子网探测和发布端口的路径：
+Podman 与 Docker 的差异集中在网络后端，对 efw 的影响只有网桥名字和发布端口的路径：
 
 | 场景 | 行为 |
 |:--|:--|
-| rootful（默认 netavark，Podman ≥ 4.0） | 与 Docker 等价：`apply` 自动探测 `podman` 默认网络（`10.88.0.0/16`）及自建网络的子网；发布端口在 nat 阶段 DNAT，走 `forward` 链 |
-| rootful + CNI（Podman 3.x） | 子网从 CNI 配置 `plugins[].ipam.ranges` 读取，其余同上；Podman 5 起只有 netavark |
-| rootless（pasta / slirp4netns） | 没有宿主侧 DNAT，发布端口由用户态转发进程监听，按 `input` 链的端口 ACL 过滤；不需要网段探测。容器访问宿主服务的源地址是宿主地址/loopback，被拦时在 ACL 显式放行 |
+| rootful（默认 netavark，Podman ≥ 4.0） | 与 Docker 等价：ACL 用 `iface br-*` + `iface docker0` 信任；发布端口在 nat 阶段 DNAT，走 `forward` 链。Podman 默认网络的网桥名通常是 `podman0`，按实际名字显式放行（如 `iface podman0`） |
+| rootful + CNI（Podman 3.x） | CNI 网桥通常为 `cni-podman0`，按实际名字放行；Podman 5 起只有 netavark |
+| rootless（pasta / slirp4netns） | 没有宿主侧 DNAT，发布端口由用户态转发进程监听，按 `input` 链的端口 ACL 过滤；容器访问宿主服务的源地址是宿主地址/loopback，被拦时在 ACL 显式放行 |
 
-- 探测以 root 身份执行，只看到 rootful 网络；rootless 网络在用户自己的配置目录里，不参与探测。
+- efw 不做运行时探测；网桥名字可用 `ip -br link` 确认后写进 ACL。
 - Podman 的隔离链同样在 filter priority 0，efw 的 `-10` 仍然先决策。
 - 与 Docker 相同：默认网络子网（`10.88.0.0/16`、`172.17.0.0/16`）会整段放行。如果宿主的真实内网恰好落在这些网段，需要留意这是「视为内部」而非「仅容器」。

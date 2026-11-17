@@ -25,6 +25,45 @@ drop
 	}
 }
 
+// TestIfaceWildcard 支持尾缀 *（nft iifname 通配符），用于按 Docker 网桥信任容器来源。
+func TestIfaceWildcard(t *testing.T) {
+	out := string(compileOK(t, `accept {
+  iface br-*
+  iface docker0
+}
+drop
+`))
+	for _, want := range []string{
+		`iifname "br-*" accept`,
+		`iifname "docker0" accept`,
+		`ct status dnat iifname "br-*" accept`,
+		`ct status dnat iifname "docker0" accept`,
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("产物缺少 %q:\n%s", want, out)
+		}
+	}
+}
+
+// TestIfaceWildcardErrors 通配符只允许尾缀一个 *。
+func TestIfaceWildcardErrors(t *testing.T) {
+	cases := []struct {
+		name string
+		src  string
+	}{
+		{"中间通配", "accept {\n  iface br-*-x\n}\ndrop\n"},
+		{"只有通配符", "accept {\n  iface *\n}\ndrop\n"},
+		{"通配后过长", "accept {\n  iface abcdefghijklmno*\n}\ndrop\n"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, err := compileRaw(tc.src); err == nil || !strings.Contains(err.Error(), "网卡名") {
+				t.Fatalf("期望网卡名错误，实际: %v", err)
+			}
+		})
+	}
+}
+
 // TestIfaceLog iface 规则支持 log 修饰。
 func TestIfaceLog(t *testing.T) {
 	out := string(compileOK(t, "accept {\n  iface eth0 log\n}\ndrop\n"))
