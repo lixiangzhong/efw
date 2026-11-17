@@ -20,6 +20,12 @@ const (
 	// forwardChainName/forwardPriority：内置容器转发链（仅匹配 DNAT 流量）。
 	forwardChainName = "forward"
 	forwardPriority  = "-10"
+
+	// masqueradeChainName/masqueradePriority：出站源 NAT 链。
+	// 90 先于 Docker/Netavark/Tailscale 的 srcnat(100)，显式规则优先；
+	// 同优先级跨表顺序不保证，不能依赖。
+	masqueradeChainName = "postrouting"
+	masqueradePriority  = "90"
 )
 
 // baseInternal4/baseInternal6 是默认放行的本机/非 RFC1918 来源。
@@ -87,7 +93,7 @@ func Render(f *ir.File, plan optimize.Plan, opts Options) []byte {
 
 	fmt.Fprintf(&b, "%stable inet %s {\n", indentTable, opts.Table)
 	sets := append([]optimize.Set(nil), plan.Sets...)
-	if usesPrivate(plan) {
+	if usesPrivate(plan) || masqueradeUsesPrivate(f) {
 		sets = append(sets,
 			optimize.Set{Name: ir.Private4SetName, Kind: optimize.KindIPv4, Elements: ir.Private4Prefixes},
 			optimize.Set{Name: ir.Private6SetName, Kind: optimize.KindIPv6, Elements: ir.Private6Prefixes},
@@ -102,6 +108,10 @@ func Render(f *ir.File, plan optimize.Plan, opts Options) []byte {
 	if f.Forward {
 		b.WriteString("\n")
 		renderChain(&b, f, plan, opts, forwardChainName, "forward", forwardPriority, true)
+	}
+	if len(f.Masquerades) > 0 {
+		b.WriteString("\n")
+		renderMasqueradeChain(&b, f.Masquerades)
 	}
 
 	b.WriteString("}\n")
@@ -153,6 +163,42 @@ func renderSet(b *strings.Builder, set optimize.Set) {
 	fmt.Fprintf(b, "%s}\n\n", indentSet)
 }
 
+// renderMasqueradeChain 渲染出站源 NAT 链；NAT 首条匹配生效，条目顺序必须与书写顺序一致。
+// 链优先于容器运行时/尾网的 srcnat(100)，且只在存在 masquerade 规则时生成。
+func renderMasqueradeChain(b *strings.Builder, entries []ir.Masquerade) {
+	fmt.Fprintf(b, "%schain %s {\n", indentSet, masqueradeChainName)
+	fmt.Fprintf(b, "%stype nat hook postrouting priority %s; policy accept;\n\n", indentChain, masqueradePriority)
+	fmt.Fprintf(b, "%s# 说明: 出站源 NAT；首条匹配生效，顺序即书写顺序\n", indentChain)
+	for i, entry := range entries {
+		if i > 0 {
+			b.WriteString("\n")
+		}
+		fmt.Fprintf(b, "%s# %d: %s\n", indentChain, entry.Line, strings.TrimSpace(entry.Raw))
+		for _, text := range masqueradeTexts(entry) {
+			fmt.Fprintf(b, "%s%s\n", indentChain, text)
+		}
+	}
+	fmt.Fprintf(b, "%s}\n", indentSet)
+}
+
+// masqueradeTexts 返回一条 NAT 规则的产物文本：private 固定展开 v4/v6 两条。
+func masqueradeTexts(entry ir.Masquerade) []string {
+	if entry.Src.Named == ir.PrivateName {
+		return []string{
+			fmt.Sprintf("ip saddr @%s oifname %q masquerade", ir.Private4SetName, entry.Iface),
+			fmt.Sprintf("ip6 saddr @%s oifname %q masquerade", ir.Private6SetName, entry.Iface),
+		}
+	}
+	if entry.Src.Any {
+		return []string{fmt.Sprintf("oifname %q masquerade", entry.Iface)}
+	}
+	family := "ip"
+	if entry.Src.Family == ir.FamilyIPv6 {
+		family = "ip6"
+	}
+	return []string{fmt.Sprintf("%s saddr %s oifname %q masquerade", family, entry.Src.Value, entry.Iface)}
+}
+
 func renderRule(b *strings.Builder, r optimize.Rule, logPrefix string, unreachable map[int]bool, forward bool) {
 	for i := range r.Lines {
 		fmt.Fprintf(b, "%s# %d: %s\n", indentChain, r.Lines[i], strings.TrimSpace(r.Raws[i]))
@@ -189,6 +235,16 @@ func hasPrivate(r optimize.Rule) bool {
 func usesPrivate(plan optimize.Plan) bool {
 	for _, r := range plan.Rules {
 		if hasPrivate(r) {
+			return true
+		}
+	}
+	return false
+}
+
+// masqueradeUsesPrivate 报告 masquerade 规则是否引用 private 集合。
+func masqueradeUsesPrivate(f *ir.File) bool {
+	for _, m := range f.Masquerades {
+		if m.Src.Named == ir.PrivateName {
 			return true
 		}
 	}

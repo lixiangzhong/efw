@@ -144,7 +144,7 @@ func compileFlags() []cli.Flag {
 		&cli.StringFlag{Name: "file", Aliases: []string{"f"}, Usage: "从文件读取 DSL（用于 shebang：#!/usr/local/bin/efw -f）"},
 		&cli.StringFlag{Name: "output", Aliases: []string{"o"}, Usage: "输出文件（默认 stdout）"},
 		&cli.StringFlag{Name: "table", Value: "efw", Usage: "table 名"},
-		&cli.StringFlag{Name: "chain", Value: "input", Usage: "chain 名"},
+		&cli.StringFlag{Name: "chain", Value: "input", Usage: "chain 名（不能是 forward/postrouting）"},
 		&cli.StringFlag{Name: "hook", Value: "input", Usage: "hook（v1 仅支持 input）"},
 		&cli.StringFlag{Name: "priority", Value: "filter", Usage: "priority（nft 关键字或 32 位整数）"},
 		&cli.StringFlag{Name: "log-prefix", Value: "efw: ", Usage: "log 前缀（原样输出）"},
@@ -551,6 +551,10 @@ func checkOptions(table, chain, hook, priority, logPrefix string) (string, *errs
 	if strings.EqualFold(chain, "forward") {
 		return "", errs.NewError("", 0, 0, errs.CategoryUsage, errs.CodeUsage,
 			"chain 名不能是 forward（与内置转发链冲突）")
+	}
+	if strings.EqualFold(chain, "postrouting") {
+		return "", errs.NewError("", 0, 0, errs.CategoryUsage, errs.CodeUsage,
+			"chain 名不能是 postrouting（与内置 NAT 链冲突）")
 	}
 	if !strings.EqualFold(hook, "input") {
 		return "", errs.NewError("", 0, 0, errs.CategoryUsage, errs.CodeUsage,

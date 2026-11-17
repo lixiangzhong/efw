@@ -34,8 +34,17 @@ var directiveNames = map[string]struct{}{
 	"forward":      {},
 }
 
-// blockCtx 是当前动作块的上下文。
+// blockKind 区分动作块与 masquerade（出站 NAT）块。
+type blockKind uint8
+
+const (
+	blockVerdict blockKind = iota
+	blockMasquerade
+)
+
+// blockCtx 是当前块的上下文：动作块带 verdict，masquerade 块只收集 NAT 规则。
 type blockCtx struct {
+	kind    blockKind
 	verdict ir.Verdict
 	line    int
 	rules   int
@@ -90,6 +99,15 @@ func (p *parser) parseLine(lineNo int, rawLine string) {
 		p.closeBlock(lineNo)
 		return
 	}
+	// masquerade 是独立块：可单行 `masquerade { eth1 }`，也可分行。
+	if content, ok := inlineMasquerade(text); ok {
+		p.parseInlineMasquerade(lineNo, rawLine, content)
+		return
+	}
+	if isMasqueradeHeader(text) {
+		p.openMasqueradeBlock(lineNo)
+		return
+	}
 	if verdict, content, ok := inlineBlock(text); ok {
 		p.parseInlineBlock(lineNo, rawLine, verdict, content)
 		return
@@ -99,10 +117,14 @@ func (p *parser) parseLine(lineNo int, rawLine string) {
 		return
 	}
 	if strings.HasSuffix(text, "{") {
-		p.syntaxErr(lineNo, "块头格式错误（应为 accept|drop|reject {）或花括号未闭合")
+		p.syntaxErr(lineNo, "块头格式错误（应为 accept|drop|reject { 或 masquerade {）或花括号未闭合")
 		return
 	}
 	if p.block != nil {
+		if p.block.kind == blockMasquerade {
+			p.parseMasqueradeEntry(lineNo, rawLine, text)
+			return
+		}
 		p.parseBlockRule(lineNo, rawLine, text)
 		return
 	}
@@ -120,6 +142,30 @@ func inlineBlock(text string) (ir.Verdict, string, bool) {
 		return 0, "", false
 	}
 	return verdict, strings.TrimSpace(text[idx+1 : len(text)-1]), true
+}
+
+// inlineMasquerade 识别单行 masquerade 块：`masquerade { <条目> }`。
+func inlineMasquerade(text string) (string, bool) {
+	if !strings.HasSuffix(text, "}") {
+		return "", false
+	}
+	idx := strings.IndexByte(text, '{')
+	if idx < 0 {
+		return "", false
+	}
+	if !strings.EqualFold(strings.TrimSpace(text[:idx]), "masquerade") {
+		return "", false
+	}
+	return strings.TrimSpace(text[idx+1 : len(text)-1]), true
+}
+
+// isMasqueradeHeader 识别块头 `masquerade {`（关键字大小写不敏感）。
+func isMasqueradeHeader(text string) bool {
+	if !strings.HasSuffix(text, "{") {
+		return false
+	}
+	name := strings.TrimSpace(strings.TrimSuffix(text, "{"))
+	return strings.EqualFold(name, "masquerade")
 }
 
 // parseInlineBlock 解析单行块；内容按块内一条规则处理。
@@ -140,6 +186,32 @@ func (p *parser) parseInlineBlock(lineNo int, rawLine string, verdict ir.Verdict
 	p.block = &blockCtx{verdict: verdict, line: lineNo}
 	p.parseBlockRule(lineNo, rawLine, content)
 	p.block = nil
+}
+
+// parseInlineMasquerade 解析单行 masquerade 块；内容按一条 NAT 规则处理。
+func (p *parser) parseInlineMasquerade(lineNo int, rawLine, content string) {
+	if p.block != nil {
+		p.syntaxErr(lineNo, "masquerade 不能嵌套在其他块内")
+		return
+	}
+	if content == "" {
+		p.syntaxErr(lineNo, "masquerade 块内至少需要一条规则")
+		return
+	}
+	p.rulesStarted = true
+	p.block = &blockCtx{kind: blockMasquerade, line: lineNo}
+	p.parseMasqueradeEntry(lineNo, rawLine, content)
+	p.block = nil
+}
+
+// openMasqueradeBlock 打开分行 masquerade 块。
+func (p *parser) openMasqueradeBlock(lineNo int) {
+	if p.block != nil {
+		p.syntaxErr(lineNo, "masquerade 不能嵌套在其他块内")
+		return
+	}
+	p.rulesStarted = true
+	p.block = &blockCtx{kind: blockMasquerade, line: lineNo}
 }
 
 // blockHeaderVerdict 判断一行是否是块头（accept|drop|reject {），返回块动作。
@@ -170,7 +242,11 @@ func (p *parser) closeBlock(lineNo int) {
 		return
 	}
 	if p.block.rules == 0 {
-		p.syntaxErr(p.block.line, "块内至少需要一条规则")
+		if p.block.kind == blockMasquerade {
+			p.syntaxErr(p.block.line, "masquerade 块内至少需要一条规则")
+		} else {
+			p.syntaxErr(p.block.line, "块内至少需要一条规则")
+		}
 	}
 	p.block = nil
 }
@@ -204,6 +280,8 @@ func (p *parser) parseTopLine(lineNo int, rawLine, text string) {
 		p.syntaxErr(lineNo, "单独 log 已移除：请写成 log drop / log accept，或放进动作块")
 	case first == "iface":
 		p.syntaxErr(lineNo, "iface 规则必须写在动作块内（如 accept { iface eth0 }）")
+	case first == "masquerade":
+		p.syntaxErr(lineNo, "masquerade 是独立块，块头写成 `masquerade {`（单行可写 `masquerade { eth1 }`）")
 	default:
 		p.syntaxErr(lineNo, "规则必须写在动作块内（如 accept { ... } / drop { ... } / reject { ... }）")
 	}
@@ -408,6 +486,10 @@ func (p *parser) parseBlockRule(lineNo int, rawLine, text string) {
 		p.semanticErr(lineNo, "动作行不能出现在块内（块内规则只写匹配条件；兜底写 `*`）")
 		return
 	}
+	if first == "masquerade" {
+		p.syntaxErr(lineNo, "masquerade 是独立块，不能写在动作块内")
+		return
+	}
 	if first == ir.PrivateName {
 		p.parsePrivateRule(lineNo, rawLine, text, verdict)
 		return
@@ -502,6 +584,131 @@ func (p *parser) parseIfaceRule(lineNo int, rawLine, text string, verdict ir.Ver
 	}
 	p.appendRule(lineNo, rawLine, name, ir.Addr{Any: true}, ir.Addr{Any: true}, ir.ProtoAny, ir.PortSet{}, log, false, verdict)
 	p.block.rules++
+}
+
+// parseMasqueradeEntry 解析 masquerade 块内的一行，并追加到 File.Masquerades。
+func (p *parser) parseMasqueradeEntry(lineNo int, rawLine, text string) {
+	if strings.HasSuffix(text, "{") {
+		p.syntaxErr(lineNo, "masquerade 块内不支持嵌套块")
+		return
+	}
+	entry, ok := p.parseMasquerade(lineNo, rawLine, text)
+	if !ok {
+		return
+	}
+	p.file.Masquerades = append(p.file.Masquerades, entry)
+	p.block.rules++
+}
+
+// parseMasquerade 解析一条出站 NAT 规则，支持两种形式：
+//
+//	<出接口>                → oifname "<iface>" masquerade
+//	<源地址> -> <出接口>     → [ip|ip6] saddr <src> oifname "<iface>" masquerade
+//
+// 源地址额外支持 private（展开 IPv4/IPv6 两条，复用 private4/private6 集合）。
+func (p *parser) parseMasquerade(lineNo int, rawLine, text string) (ir.Masquerade, bool) {
+	entry := ir.Masquerade{Line: lineNo, Raw: rawLine}
+
+	arrow := strings.Index(text, "->")
+	if arrow < 0 {
+		token := strings.TrimSpace(text)
+		if token == "" || len(strings.Fields(token)) != 1 {
+			p.syntaxErr(lineNo, "masquerade 每行只能写一条规则（出接口，或 `源地址 -> 出接口`）")
+			return entry, false
+		}
+		if strings.EqualFold(token, ir.PrivateName) {
+			p.semanticErr(lineNo, "private 需要写成 `private -> <出接口>`")
+			return entry, false
+		}
+		if _, msg := parseAddr(token); msg == "" {
+			p.semanticErr(lineNo, "源地址需要写成 `<源地址> -> <出接口>`")
+			return entry, false
+		}
+		// 裸 token 只能是出接口名；纯数字/点号更像写错的地址（如 300.1.1.1），
+		// 不允许被静默当成接口名（确实需要时写成 `* -> <接口名>`）。
+		if !hasASCIILetter(token) {
+			p.semanticErr(lineNo, "源地址需要写成 `<源地址> -> <出接口>`")
+			return entry, false
+		}
+		if !p.checkMasqueradeIface(lineNo, token) {
+			return entry, false
+		}
+		entry.Src = ir.Addr{Any: true}
+		entry.Iface = token
+		return entry, true
+	}
+
+	if strings.Contains(text[arrow+2:], "->") {
+		p.syntaxErr(lineNo, "masquerade 规则中出现多个 ->")
+		return entry, false
+	}
+	lhs := strings.TrimSpace(text[:arrow])
+	rhs := strings.TrimSpace(text[arrow+2:])
+	if lhs == "" || rhs == "" {
+		p.syntaxErr(lineNo, "-> 两侧都不能为空")
+		return entry, false
+	}
+	if len(strings.Fields(lhs)) != 1 {
+		p.semanticErr(lineNo, "masquerade 源地址只能有一个 token")
+		return entry, false
+	}
+	if len(strings.Fields(rhs)) != 1 {
+		p.semanticErr(lineNo, "masquerade 出接口只能有一个")
+		return entry, false
+	}
+	src, ok := p.parseMasqueradeSrc(lineNo, lhs)
+	if !ok {
+		return entry, false
+	}
+	if !p.checkMasqueradeIface(lineNo, rhs) {
+		return entry, false
+	}
+	entry.Src, entry.Iface = src, rhs
+	return entry, true
+}
+
+// parseMasqueradeSrc 解析 -> 左侧的源地址；private 作为命名集合保留。
+func (p *parser) parseMasqueradeSrc(lineNo int, raw string) (ir.Addr, bool) {
+	if strings.EqualFold(raw, ir.PrivateName) {
+		return ir.Addr{Named: ir.PrivateName}, true
+	}
+	addr, msg := parseAddr(raw)
+	if msg != "" {
+		p.semanticErr(lineNo, "masquerade 源地址不合法：%s", msg)
+		return ir.Addr{}, false
+	}
+	return addr, true
+}
+
+// checkMasqueradeIface 校验出接口名；地址形式的 token 与 DSL 关键字一律拒绝，
+// 避免把地址或结构关键字写出接口。
+func (p *parser) checkMasqueradeIface(lineNo int, name string) bool {
+	if isMasqueradeReservedWord(name) {
+		p.semanticErr(lineNo, "masquerade 出接口不能使用关键字 %q（不能作为出接口名）", name)
+		return false
+	}
+	if _, msg := parseAddr(name); msg == "" {
+		p.semanticErr(lineNo, "masquerade 出接口不能是地址：%q", name)
+		return false
+	}
+	if !ifaceNameRe.MatchString(name) {
+		p.semanticErr(lineNo, "网卡名 %q 不合法（允许字母/数字/_.@-，长度 1-15）", name)
+		return false
+	}
+	return true
+}
+
+// isMasqueradeReservedWord 报告 token 是否为 DSL 结构关键字/协议名。
+// 裸 token 与 -> 右侧都按出接口解析，关键字必须显式拒绝，避免静默生成无效规则。
+func isMasqueradeReservedWord(raw string) bool {
+	switch strings.ToLower(raw) {
+	case "accept", "drop", "reject", "log", "iface", "private", "masquerade",
+		"established", "v6-bootstrap", "forward",
+		"tcp", "udp", "icmp", "tcp4", "tcp6", "udp4", "udp6", "icmp4", "icmp6":
+		return true
+	default:
+		return false
+	}
 }
 
 // parseBlockShortRule 解析块内无箭头规则：src [proto] [log] [动作]，等价 src -> *://*:*。
@@ -664,6 +871,10 @@ func mergePortListFragments(tokens []string) []string {
 
 // parseSrcToken 解析源地址（不允许带端口）。
 func (p *parser) parseSrcToken(lineNo int, raw string) (ir.Addr, bool) {
+	if strings.EqualFold(raw, "masquerade") {
+		p.semanticErr(lineNo, "masquerade 只能写成独立块，不能作为规则的一部分")
+		return ir.Addr{}, false
+	}
 	if strings.EqualFold(raw, ir.PrivateName) {
 		p.semanticErr(lineNo, "private 只能单独成行（表示私有源地址），不能与其他匹配条件组合")
 		return ir.Addr{}, false
@@ -734,6 +945,10 @@ func (p *parser) parseRhsMatchTokens(lineNo int, tokens []string) (ir.Addr, ir.P
 func (p *parser) classifyToken(lineNo int, raw string) (tokenKind, ir.Addr, ir.PortSet, bool) {
 	if strings.Contains(raw, "://") {
 		p.syntaxErr(lineNo, "`://` 语法已移除：协议请写成独立 token，目的地址直接写（如 `tcp 10.0.0.1:80`）")
+		return tokenAddr, ir.Addr{}, ir.PortSet{}, false
+	}
+	if strings.EqualFold(raw, "masquerade") {
+		p.semanticErr(lineNo, "masquerade 只能写成独立块，不能作为规则的一部分")
 		return tokenAddr, ir.Addr{}, ir.PortSet{}, false
 	}
 	if strings.EqualFold(raw, ir.PrivateName) || strings.HasPrefix(strings.ToLower(raw), ir.PrivateName+":") {
@@ -994,6 +1209,16 @@ func parseAddr(raw string) (ir.Addr, string) {
 func isIPv4(raw string) bool {
 	addr, msg := parseAddr(raw)
 	return msg == "" && addr.Family == ir.FamilyIPv4
+}
+
+// hasASCIILetter 报告 s 是否含 ASCII 字母，用于区分裸出接口名与像地址的 token。
+func hasASCIILetter(s string) bool {
+	for _, r := range s {
+		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') {
+			return true
+		}
+	}
+	return false
 }
 
 func parsePortItem(item string) (uint16, uint16, string) {
