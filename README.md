@@ -3,7 +3,7 @@
 把一套面向 ACL 的 DSL 编译成**完整、可直接 `nft -f` 加载**的 nftables ruleset。
 
 - 默认纯离线编译；`efw apply` 编译后直接原子应用到内核，重复执行即覆盖。
-- 覆盖入站（`input`）与容器发布端口（`forward`，仅 DNAT 流量，Docker/Podman），`table inet` 双栈。
+- 覆盖入站（`input`）与容器发布端口（`forward`，仅 DNAT 流量，Docker/Podman）；可选 `masquerade` 出站源 NAT（`postrouting`），按源地址/出接口匹配。`table inet` 双栈。
 - **只拦截外部来源**：默认放行 loopback/CGNAT/link-local 与 IPv6 ULA/link-local，RFC1918 默认不放；有 Docker/Podman（rootful）时 `apply` 自动探测并放行其网段。`input` 链首默认放行 `lo`；需要整卡放行/拒绝时写独立规则 `iface <网卡名>`。
 
 设计细节、错误码与验收标准见本地 SPEC.md（不纳入版本库），本文只讲怎么用。
@@ -111,6 +111,7 @@ drop { <规则> }                    # 同上（reject 同理）
 accept { * } / drop { * }          # 兜底：匹配一切，必须最后一条（可简写为 accept / drop）
 iface <name> [log]                 # 整卡规则：该入口网卡上的全部流量（动作继承块头）
 private                            # 独立一行：私有源地址（RFC1918 + RFC4193 ULA）
+masquerade { <出接口> | <源地址> -> <出接口> }   # 出站源 NAT（内核 ≥5.2）
 # <规则> = [proto] src [proto] -> [dst] [port]    # proto 可出现在匹配部分任意位置
 ```
 
@@ -138,12 +139,25 @@ accept {
 
 IPv6 带端口写成 `[2001:db8::1]:443`；纯数字一律视为端口（`-> 2001` 是端口 2001）。
 
+出站源 NAT 用独立的 `masquerade` 块（生成 `postrouting` 链，priority 90）：
+
+```text
+masquerade {
+    eth1                      # 所有从 eth1 出的流量
+    192.168.1.0/24 -> eth1    # 只 NAT 该源网段
+    private -> eth1           # 私有源地址（RFC1918 + ULA）
+}
+```
+
+NAT 只做地址转换，不负责放行转发流量：需要 `ip_forward=1` 且 FORWARD 策略允许。出接口必须是网卡名；`private` 可作源地址。详见 [DSL 参考](guide/dsl.md)。
+
 ## 安全默认
 
 efw 在 input/forward 两条链的**最前面**自动放行「本机 / 非 RFC1918」来源；**RFC1918 默认不放行**。Docker/Podman（rootful）存在时 `apply` 自动把其子网加入放行集合（`compile` 不探测环境，保持确定性）。
 
 - 需要内网访问时写 `private`（独立一行，表示私有源地址）或具体网段。
 - `input` 链首默认放行 `lo`：本机访问自身公网/内网地址不受 ACL 影响；如需整卡放行/拒绝，用独立规则 `iface <网卡名>`（不能与源/端口组合）。
+- `masquerade` 只做源 NAT，不改变 FORWARD 过滤：转发是否放行取决于 `ip_forward` 与主机 FORWARD 策略（efw 的 `forward` 链只处理 DNAT 流量）。
 - 伪造来源仍可能被放行；`rp_filter=0` 时建议开启反向路径过滤。
 - 完整语义、apply 流程与容器发布端口见 [部署说明](guide/deploy.md)。
 

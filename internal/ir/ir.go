@@ -201,12 +201,22 @@ func (r Rule) ActionKey() string {
 	return fmt.Sprintf("%t|%s", r.Log, r.Verdict)
 }
 
+// Masquerade 是一条出站源 NAT 规则：匹配源地址后从指定接口 masquerade。
+// 与 Rule 不同，它不参与 verdict/兜底/优化，按书写顺序生成（NAT 首条匹配生效）。
+type Masquerade struct {
+	Line  int
+	Raw   string
+	Src   Addr   // 源地址；Any 表示不限制来源（只按出接口）
+	Iface string // 出接口名（必填）
+}
+
 // File 是解析后的完整 DSL 文件。
 type File struct {
 	Established bool // true = auto
 	V6Bootstrap bool // true = auto
 	Forward     bool // true = auto（同时生成 forward 链，仅匹配 DNAT 流量）
 	Rules       []Rule
+	Masquerades []Masquerade
 }
 
 // MatchesAll 报告规则是否匹配一切（用于识别兜底规则）。

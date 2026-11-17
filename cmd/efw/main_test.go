@@ -31,6 +31,7 @@ func TestRun(t *testing.T) {
 		{name: "编译错误退出码", args: []string{"compile"}, stdin: "v6-bootstrap off\naccept { 1.1.1.1 -> tcp *:80 }\n", wantExit: 1, wantStderr: "E100"},
 		{name: "文件不存在", args: []string{"compile", "/nonexistent/efw.acl"}, wantExit: 2, wantStderr: "E103"},
 		{name: "非法 hook", args: []string{"compile", "--hook", "forward"}, stdin: validACL, wantExit: 2, wantStderr: "E103"},
+		{name: "chain 为 postrouting", args: []string{"compile", "--chain", "postrouting"}, stdin: validACL, wantExit: 2, wantStderr: "E103"},
 		{name: "非法 priority", args: []string{"compile", "--priority", "not-a-priority"}, stdin: validACL, wantExit: 2, wantStderr: "E103"},
 		{name: "-o 空路径", args: []string{"compile", "-o", ""}, stdin: validACL, wantExit: 2, wantStderr: "E103"},
 		{name: "未知 flag", args: []string{"compile", "--bogus"}, stdin: validACL, wantExit: 2, wantStderr: "E103"},

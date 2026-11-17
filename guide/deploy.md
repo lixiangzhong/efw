@@ -15,7 +15,7 @@ efw compile \
 |:--|:--|:--|
 | `-f, --file` | — | 显式指定 DSL 文件（等价 `efw <file>` 位置参数） |
 | `--table` | `efw` | table 名，不能是 nft 关键字 |
-| `--chain` | `input` | chain 名，不能是 nft 关键字 |
+| `--chain` | `input` | chain 名，不能是 nft 关键字；也不能是 `forward` / `postrouting`（与内置链冲突） |
 | `--hook` | `input` | v1 仅支持 input |
 | `--priority` | `filter` | `raw`/`mangle`/`filter`/`security`/`dstnat`/`srcnat` 或 32 位整数（关键字统一小写） |
 | `--log-prefix` | `"efw: "` | 原样输出；非空，不得含引号/反斜杠/控制字符 |
@@ -99,6 +99,25 @@ chain forward {
 - `iface <网卡名>` 是独立整卡规则，在 input/forward 两条链都生效（forward 侧即该入口网卡上的 DNAT 流量）。
 - 已知边界：host 网络模式的容器、rootless Docker/Podman（无宿主 DNAT）、以及非容器运行时的 DNAT 端口转发也会落入 `ct status dnat` 的作用范围；容器之间的东西向流量不在其列。
 - 容器网段整段视为内部来源：efw 对它的放行不带 `ct status dnat`，但**不会改变运行时的隔离结论**——Docker/Netavark 的转发 drop 仍然生效（实测跨网络容器仍被 Docker 隔离拦截）。
+
+## 出站 NAT（masquerade）
+
+`masquerade` 块生成同一张 `table inet <table>` 里的 `postrouting` nat 链，用于把 LAN/私网流量源 NAT 到出口网卡：
+
+```nft
+chain postrouting {
+    type nat hook postrouting priority 90; policy accept;
+    ip saddr 192.168.1.0/24 oifname "eth1" masquerade
+}
+```
+
+- 优先级 90 **先于** Docker/Netavark/Tailscale 的 srcnat（100）；NAT 首条匹配生效，显式源网段规则优先生效。不要依赖同优先级（100）的跨表顺序。
+- 需要内核 ≥ 5.2（`inet` 族 NAT）。已在 nft 1.0.6 / 1.0.9（kernel 6.1 / 6.8）上用 `nft -c` 实测通过；旧内核会在校验阶段失败。
+- 需要 `net.ipv4.ip_forward=1`，且 FORWARD 策略允许转发。efw 的 `forward` 链**只匹配 DNAT 流量**，不会为 LAN→WAN 转发自动放行，也不做非 DNAT 转发过滤；若主机 FORWARD 为 DROP（部分 Docker 默认），需另行放行。
+- 裸出接口（`masquerade { eth1 }`）会对所有从该口出的流量做 SNAT，包括 Tailscale/Docker 转发的流量；生产建议用源网段限定。
+- 只影响新连接：已有 conntrack 条目保持原 NAT 映射；变更后用新连接验证。
+- `--chain postrouting` 被禁用（与内置 NAT 链冲突）；没有 `masquerade` 块时不生成该链。
+- 验证时可用独立 `--table efw_nat_test` + netns/veth 做「未 NAT → NAT」A/B，测完 `nft delete table inet efw_nat_test`，不碰生产表与 `/etc/fw.sh`。
 
 ## Podman 说明
 

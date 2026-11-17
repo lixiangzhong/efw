@@ -34,6 +34,8 @@ docker run --rm -v "$PWD":/w -w /w --cap-add=NET_ADMIN debian:12 sh -c '
   for f in testdata/golden/*.nft; do nft -c -f "$f" || exit 1; done && echo ALL-OK'
 ```
 
+含 `masquerade` 的黄金用例会校验 `postrouting` nat 链，需要内核启用 `nf_nat`（Docker 宿主通常已加载）。
+
 ## v1 不做
 
 命名集合/别名、规则热更新、SCTP/DCCP、Docker API 动态端口发现 —— 详见规格文档 SPEC.md §10（本地维护，不纳入版本库）。
