@@ -49,6 +49,14 @@ func compileRaw(src string) ([]byte, error) {
 	return out, err
 }
 
+func TestCommentControlCharSanitization(t *testing.T) {
+	src := "accept {\n  80 # malicious\rcomment\x1b[31m\n}\ndrop\n"
+	out := compileOK(t, src)
+	if strings.Contains(string(out), "\r") || strings.Contains(string(out), "\x1b") {
+		t.Fatalf("产物不应包含未转义控制字符: %q", string(out))
+	}
+}
+
 // stripComments 去掉注释行与空行，便于比较两种语法糖的产物语义。
 func stripComments(out []byte) string {
 	var lines []string
