@@ -374,7 +374,8 @@ func probeNetworkNets(bin string) ([]string, error) {
 	if len(ids) == 0 {
 		return nil, nil
 	}
-	out, err = exec.Command(bin, append([]string{"network", "inspect"}, ids...)...).Output()
+	args := append([]string{"network", "inspect", "--"}, ids...)
+	out, err = exec.Command(bin, args...).Output()
 	if err != nil {
 		return nil, fmt.Errorf("无法读取网络子网：%w", err)
 	}
@@ -434,17 +435,25 @@ func normalizeNets(nets []string, stderr io.Writer, quiet bool) []string {
 		if net == "" {
 			continue
 		}
-		if _, err := netip.ParsePrefix(net); err != nil {
+		prefix, err := netip.ParsePrefix(net)
+		if err != nil {
 			if !quiet {
 				fmt.Fprintf(stderr, "efw: 警告: 忽略无法解析的容器网段 %q\n", net)
 			}
 			continue
 		}
-		if _, ok := seen[net]; ok {
+		if prefix.Bits() == 0 {
+			if !quiet {
+				fmt.Fprintf(stderr, "efw: 警告: 忽略全网段容器地址 %q（避免绕过防火墙）\n", net)
+			}
 			continue
 		}
-		seen[net] = struct{}{}
-		valid = append(valid, net)
+		canonical := prefix.Masked().String()
+		if _, ok := seen[canonical]; ok {
+			continue
+		}
+		seen[canonical] = struct{}{}
+		valid = append(valid, canonical)
 	}
 	sort.Strings(valid)
 	return valid

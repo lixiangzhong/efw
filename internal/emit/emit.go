@@ -173,7 +173,7 @@ func renderMasqueradeChain(b *strings.Builder, entries []ir.Masquerade) {
 		if i > 0 {
 			b.WriteString("\n")
 		}
-		fmt.Fprintf(b, "%s# %d: %s\n", indentChain, entry.Line, strings.TrimSpace(entry.Raw))
+		fmt.Fprintf(b, "%s# %d: %s\n", indentChain, entry.Line, commentText(strings.TrimSpace(entry.Raw)))
 		for _, text := range masqueradeTexts(entry) {
 			fmt.Fprintf(b, "%s%s\n", indentChain, text)
 		}
@@ -201,7 +201,7 @@ func masqueradeTexts(entry ir.Masquerade) []string {
 
 func renderRule(b *strings.Builder, r optimize.Rule, logPrefix string, unreachable map[int]bool, forward bool) {
 	for i := range r.Lines {
-		fmt.Fprintf(b, "%s# %d: %s\n", indentChain, r.Lines[i], strings.TrimSpace(r.Raws[i]))
+		fmt.Fprintf(b, "%s# %d: %s\n", indentChain, r.Lines[i], commentText(strings.TrimSpace(r.Raws[i])))
 		if unreachable[r.Lines[i]] {
 			fmt.Fprintf(b, "%s# W1: unreachable（与前面的规则匹配重复，不会被命中）\n", indentChain)
 		}

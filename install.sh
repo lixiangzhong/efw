@@ -137,6 +137,15 @@ else
 	esac
 fi
 
+# 严格校验版本格式，防止异常字符或路径穿越
+case "$tag" in
+v[0-9]*.[0-9]*) ;;
+*) die "版本格式非法: $tag（期望如 v1.4.0）" ;;
+esac
+case "$tag" in
+*[!A-Za-z0-9._-]*) die "版本包含非法字符: $tag" ;;
+esac
+
 ver="${tag#v}"
 asset="efw_${ver}_linux_${arch}"
 url="https://github.com/$REPO/releases/download/$tag/$asset"
@@ -148,22 +157,23 @@ echo "下载 $asset（$tag）..."
 fetch_github "$url" "$tmp/$asset" ||
 	die "下载失败: $url（可改用 VERSION=v1.4.0 指定版本，或检查网络）"
 
-# checksums.txt 与二进制来自同一批源，SHA256 只能拦传输损坏，不能防镜像本身投毒。
-if fetch_github "https://github.com/$REPO/releases/download/$tag/checksums.txt" "$tmp/checksums.txt" 2>/dev/null; then
+# 下载 checksums.txt 并验证二进制 SHA256，校验失败或无法获取必须中止，严禁降级静默安装。
+if [ "${SKIP_CHECKSUM:-0}" = "1" ]; then
+	echo "警告: 已跳过 SHA256 校验（SKIP_CHECKSUM=1）" >&2
+elif fetch_github "https://github.com/$REPO/releases/download/$tag/checksums.txt" "$tmp/checksums.txt" 2>/dev/null; then
 	expected="$(awk -v a="$asset" '$2 == a { print $1; exit }' "$tmp/checksums.txt")"
 	if [ -z "$expected" ]; then
-		echo "警告: checksums.txt 中没有 $asset，跳过校验" >&2
-	else
-		if command -v sha256sum >/dev/null 2>&1; then
-			actual="$(sha256sum "$tmp/$asset" | awk '{print $1}')"
-		else
-			actual="$(shasum -a 256 "$tmp/$asset" | awk '{print $1}')"
-		fi
-		[ "$actual" = "$expected" ] || die "SHA256 校验失败"
-		echo "SHA256 校验通过"
+		die "checksums.txt 中未包含 $asset 校验和，中止安装（如确需跳过可用 SKIP_CHECKSUM=1）"
 	fi
+	if command -v sha256sum >/dev/null 2>&1; then
+		actual="$(sha256sum "$tmp/$asset" | awk '{print $1}')"
+	else
+		actual="$(shasum -a 256 "$tmp/$asset" | awk '{print $1}')"
+	fi
+	[ "$actual" = "$expected" ] || die "SHA256 校验失败（期望: $expected，实际: $actual）"
+	echo "SHA256 校验通过"
 else
-	echo "警告: 无法下载 checksums.txt，跳过校验" >&2
+	die "无法下载 checksums.txt，为保障安全已中止安装（如确需跳过可用 SKIP_CHECKSUM=1）"
 fi
 
 chmod 0755 "$tmp/$asset"

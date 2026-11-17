@@ -168,4 +168,16 @@ func TestDetectContainerNets(t *testing.T) {
 			t.Fatalf("--quiet 时不应告警，实际: %s", stderr.String())
 		}
 	})
+
+	t.Run("normalizeNets 过滤 0.0.0.0/0 与 ::/0 并规范化前缀", func(t *testing.T) {
+		var stderr bytes.Buffer
+		nets := normalizeNets([]string{"0.0.0.0/0", "::/0", "172.17.0.1/16", "fd00::1/64"}, &stderr, false)
+		want := []string{"172.17.0.0/16", "fd00::/64"}
+		if !slices.Equal(nets, want) {
+			t.Fatalf("应过滤全网段并规范化前缀: want %v, got %v", want, nets)
+		}
+		if !strings.Contains(stderr.String(), "忽略全网段容器地址 \"0.0.0.0/0\"") || !strings.Contains(stderr.String(), "忽略全网段容器地址 \"::/0\"") {
+			t.Fatalf("应打印全网段告警: %s", stderr.String())
+		}
+	})
 }
