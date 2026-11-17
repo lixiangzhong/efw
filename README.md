@@ -20,7 +20,7 @@ wget -qO- https://raw.githubusercontent.com/lixiangzhong/efw/main/install.sh | s
 
 ```bash
 # 指定版本 / 安装目录
-curl -fsSL https://raw.githubusercontent.com/lixiangzhong/efw/main/install.sh | VERSION=v1.3.0 sh
+curl -fsSL https://raw.githubusercontent.com/lixiangzhong/efw/main/install.sh | VERSION=v1.4.0 sh
 curl -fsSL https://raw.githubusercontent.com/lixiangzhong/efw/main/install.sh | BINDIR="$HOME/.local/bin" sh
 ```
 
@@ -34,7 +34,7 @@ curl -fsSL https://raw.githubusercontent.com/lixiangzhong/efw/main/install.sh | 
 curl -fsSL https://gh-proxy.com/https://raw.githubusercontent.com/lixiangzhong/efw/main/install.sh | sh
 ```
 
-个别镜像只代理下载、不代理 `api.github.com`，版本探测失败时用 `VERSION=v1.3.0` 指定。SHA256 只能防传输损坏、无法防镜像投毒，介意请安装后与官方 Release 比对。
+个别镜像只代理下载、不代理 `api.github.com`，版本探测失败时用 `VERSION=v1.4.0` 指定。SHA256 只能防传输损坏、无法防镜像投毒，介意请安装后与官方 Release 比对。
 
 从源码构建：
 
@@ -53,8 +53,8 @@ go build -o efw ./cmd/efw
 v6-bootstrap off
 
 accept {
-    tcp 1.1.3.0/24 -> 80
-    tcp 1.1.3.0/24 -> 443
+    tcp 1.1.4.0/24 -> 80
+    tcp 1.1.4.0/24 -> 443
     2.2.2.2         -> 8080
     icmp            *
 }
@@ -75,7 +75,7 @@ drop                     # 兜底：以上都不匹配的一律丢弃
 #!/usr/local/bin/efw apply
 
 accept {
-    1.1.3.0/24 -> 22
+    1.1.4.0/24 -> 22
 }
 
 drop
