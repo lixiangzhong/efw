@@ -4,7 +4,7 @@
 
 - 默认纯离线编译；`efw apply` 编译后直接原子应用到内核，重复执行即覆盖。
 - 覆盖入站（`input`）与容器发布端口（`forward`，仅 DNAT 流量，Docker/Podman）；可选 `masquerade` 出站源 NAT（`postrouting`），按源地址/出接口匹配。`table inet` 双栈。
-- **只拦截外部来源**：默认放行 loopback/CGNAT/link-local 与 IPv6 ULA/link-local，RFC1918 默认不放；有 Docker/Podman（rootful）时 `apply` 自动探测并放行其网段。`input` 链首默认放行 `lo`；需要整卡放行/拒绝时写独立规则 `iface <网卡名>`。
+- **只拦截外部来源**：默认放行 loopback/CGNAT/link-local 与 IPv6 ULA/link-local，RFC1918 默认不放；容器来源用 ACL 的 `iface br-*` / `iface docker0` 显式信任（`apply` 不再探测运行时网段）。`input` 链首默认放行 `lo`；需要整卡放行/拒绝时写独立规则 `iface <网卡名>`。
 
 设计细节、错误码与验收标准见本地 SPEC.md（不纳入版本库），本文只讲怎么用。
 
@@ -43,6 +43,18 @@ go build -o efw ./cmd/efw
 ```
 
 要求 Go 1.27+；唯一的第三方依赖是 CLI 框架 [urfave/cli v3](https://github.com/urfave/cli)，编译链路保持标准库。CLI 内置 `efw help` 与 `efw version`（等价 `--version`）。
+
+### 旧版 nft（<1.0，如 CentOS 7 的 0.8）
+
+nft 0.8 只接受数字 priority、不支持 `th dport` 与 `nft -f -`。`apply` 会按 `nft --version` 自动识别 0.x；`compile` 需要显式加 `--compat`：
+
+```bash
+efw apply rules.acl              # 0.x 上自动使用兼容产物
+efw apply --compat rules.acl     # 显式指定
+efw compile --compat -o rules.nft rules.acl
+```
+
+compat 产物把 priority 写成数字、把「省略协议 + 端口」拆成 tcp/udp 两条；**masquerade 不可用**（inet 族 NAT 需内核 ≥5.2），出现时直接报 `E102`。nft 0.8 的 `ct original` 实测可用，Docker 发布端口的 forward 链不受影响。
 
 ## 快速开始
 
@@ -109,7 +121,7 @@ v6-bootstrap auto|off              # 默认 auto：兜底为 drop/reject 时放�
 accept { <规则> }                  # 块内省略 action，继承块动作
 drop { <规则> }                    # 同上（reject 同理）
 accept { * } / drop { * }          # 兜底：匹配一切，必须最后一条（可简写为 accept / drop）
-iface <name> [log]                 # 整卡规则：该入口网卡上的全部流量（动作继承块头）
+iface <name|prefix*> [log]         # 整卡规则：该入口网卡上的全部流量（动作继承块头；支持尾缀 *）
 private                            # 独立一行：私有源地址（RFC1918 + RFC4193 ULA）
 masquerade { <出接口> | <源地址> -> <出接口> }   # 出站源 NAT（内核 ≥5.2）
 # <规则> = [proto] src [proto] -> [dst] [port]    # proto 可出现在匹配部分任意位置
@@ -119,7 +131,7 @@ masquerade { <出接口> | <源地址> -> <出接口> }   # 出站源 NAT（内�
 |:--|:--|
 | `src` / `dst` | IPv4/IPv6 字面量、CIDR、`*` |
 | `private` | 私有源地址集合：IPv4 RFC1918（`10.0.0.0/8`、`172.16.0.0/12`、`192.168.0.0/16`）+ IPv6 ULA（`fc00::/7`）；**只能单独成行**（可加 `log`） |
-| `iface` | 入口网卡名（`eth0`、`ens3`；独立成规则 `iface eth0`，≤15 字符） |
+| `iface` | 入口网卡名（`eth0`、`ens3`；独立成规则 `iface eth0`，≤15 字符；支持尾缀 `*` 通配，如 `iface br-*`、`iface docker*`） |
 | `proto` | `tcp`、`udp`、`icmp`（双栈）；`tcp4`/`tcp6`/`udp4`/`udp6`/`icmp4`/`icmp6`（单栈）；省略 = 任意协议 |
 | `port` | `80`、`80-90`、`80,443`（或 `{80,443}`）、`*`；一律指目的端口 |
 | `action` | 由块头决定；块内 `log` 是修饰（log + 块动作），无单独 log |
@@ -133,6 +145,8 @@ accept {
     1.1.1.5 -> {80, 443}     # 端口列表
     tcp4 1.1.1.11 -> 80      # 仅 IPv4 TCP
     iface eth0               # 仅从 eth0 进入的全部流量
+    iface br-*               # 仅从 Docker 网桥（br-xxxx）进入的全部流量
+    iface docker0            # Docker 默认 bridge 网络
     tcp4 80                  # = * -> tcp4 80（所有 IPv4 来源）
 }
 ```
@@ -156,7 +170,7 @@ NAT 只做地址转换，不负责放行转发流量：需要 `ip_forward=1` 且
 efw 在 input/forward 两条链的**最前面**自动放行「本机 / 非 RFC1918」来源；**RFC1918 默认不放行**。Docker/Podman（rootful）存在时 `apply` 自动把其子网加入放行集合（`compile` 不探测环境，保持确定性）。
 
 - 需要内网访问时写 `private`（独立一行，表示私有源地址）或具体网段。
-- `input` 链首默认放行 `lo`：本机访问自身公网/内网地址不受 ACL 影响；如需整卡放行/拒绝，用独立规则 `iface <网卡名>`（不能与源/端口组合）。
+- `input` 链首默认放行 `lo`：本机访问自身公网/内网地址不受 ACL 影响；如需整卡放行/拒绝，用独立规则 `iface <网卡名>`（支持尾缀 `*`，不能与源/端口组合）。容器来源用 `iface br-*` / `iface docker0` 显式信任，不按网段放行。
 - `masquerade` 只做源 NAT，不改变 FORWARD 过滤：转发是否放行取决于 `ip_forward` 与主机 FORWARD 策略（efw 的 `forward` 链只处理 DNAT 流量）。
 - 伪造来源仍可能被放行；`rp_filter=0` 时建议开启反向路径过滤。
 - 完整语义、apply 流程与容器发布端口见 [部署说明](guide/deploy.md)。
