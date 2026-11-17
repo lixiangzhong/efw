@@ -73,3 +73,28 @@ drop {
 
 块内 action 省略并继承块动作，显式写的动作必须与块头一致；规则按块与块内文本顺序展开。
 **块外不能写普通规则**（会报 E101）；兜底可写 `drop { * }`，也可简写为 `drop`（支持 `log drop`、`accept`）。
+
+## masquerade（出站源 NAT）
+
+`masquerade` 是独立的顶层块，生成 `postrouting` 链（`type nat hook postrouting priority 90`），按源地址/出接口做源 NAT：
+
+```text
+masquerade {
+    eth1                      # 所有从 eth1 出的流量
+    192.168.1.0/24 -> eth1    # 只 NAT 该源网段
+    2001:db8:1::/64 -> eth1    # IPv6 源网段
+    private -> eth1           # 私有源地址（RFC1918 + RFC4193 ULA）
+    * -> eth1                 # 等价 eth1
+}
+```
+
+- 一条规则两种形式：`<出接口>`（不限定来源）或 `<源地址> -> <出接口>`；`->` 左侧必须是源地址，右侧必须是出接口。
+- 源地址支持 IP/CIDR、`*`、`private`；出接口必须是网卡名（≤15 字符，允许字母/数字/`_.@-`），不能写成地址，也不能使用 DSL 关键字（`accept`/`drop`/`tcp`/`private` 等）。
+- `private` 展开为 `ip saddr @private4` / `ip6 saddr @private6` 两条，并复用 `private4`/`private6` 集合（按需生成）。
+- 可写多个块、多行；**严格按书写顺序生成，不去重/不重排**——NAT 首条匹配生效，顺序即语义。多条时建议具体源网段在前、整卡/`*` 在后。
+- 不支持目的地址、协议、端口、`log`；不支持只写源地址（必须指定出接口）。
+- 只在出现 `masquerade` 块时生成 NAT 链；没有该块时产物不变。
+- `masquerade` 不替代兜底规则：文件仍需满足「展开后最后一条匹配一切」的要求（如 `drop` / `accept`）。
+- `--chain postrouting` 被禁用（与内置链冲突）。
+- 需要内核 ≥ 5.2（`inet` 族 NAT）。NAT 只做地址转换，转发流量是否放行由 `ip_forward` 与 FORWARD 策略决定；efw 的 `forward` 链只处理 DNAT 流量。
+- 出接口一般填 WAN 口；`compile` 不校验网卡是否存在。可用 `nft -c -f` 或 `efw apply` 在目标机校验。
