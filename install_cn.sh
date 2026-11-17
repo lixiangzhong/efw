@@ -121,7 +121,7 @@ latest_tag() {
 }
 
 if [ -z "$VERSION" ]; then
-	tag="$(latest_tag)" || die "无法获取最新版本；请用 VERSION=v1.4.0 指定版本"
+	tag="$(latest_tag)" || die "无法获取最新版本；请用 VERSION=v1.5.0 指定版本"
 else
 	tag="$VERSION"
 	case "$tag" in
@@ -133,7 +133,7 @@ fi
 # 严格校验版本格式，防止异常字符或路径穿越
 case "$tag" in
 v[0-9]*.[0-9]*) ;;
-*) die "版本格式非法: ${tag}（期望如 v1.4.0）" ;;
+*) die "版本格式非法: ${tag}（期望如 v1.5.0）" ;;
 esac
 case "$tag" in
 *[!A-Za-z0-9._-]*) die "版本包含非法字符: $tag" ;;
@@ -148,7 +148,7 @@ trap 'rm -rf "$tmp"' EXIT INT TERM
 
 echo "下载 ${asset}（${tag}）..."
 fetch_mirror "$url" "$tmp/$asset" ||
-	die "下载失败: ${url}（可改用 VERSION=v1.4.0 指定版本，或检查网络/更换镜像）"
+	die "下载失败: ${url}（可改用 VERSION=v1.5.0 指定版本，或检查网络/更换镜像）"
 
 # 下载 checksums.txt 并验证二进制 SHA256，校验失败或无法获取必须中止，严禁降级静默安装。
 if [ "${SKIP_CHECKSUM:-0}" = "1" ]; then
