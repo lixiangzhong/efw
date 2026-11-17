@@ -165,12 +165,43 @@ masquerade {
 
 NAT 只做地址转换，不负责放行转发流量：需要 `ip_forward=1` 且 FORWARD 策略允许。出接口必须是网卡名；`private` 可作源地址。详见 [DSL 参考](guide/dsl.md)。
 
+## 容器访问宿主机（按需放行）
+
+efw **不默认信任容器**，也不探测 Docker/Podman 网段；容器访问宿主（含访问宿主发布端口）需要在 ACL 里按**入口网桥**显式放行。
+
+Docker：
+
+```text
+accept {
+    iface br-*      # 自定义网络（br-<id>）；新建网络、换地址池都覆盖
+    iface docker0   # 默认 bridge 网络
+}
+drop
+```
+
+Podman：
+
+```text
+accept {
+    iface podman0       # rootful netavark 默认网络（实测）
+    iface cni-podman0   # rootful CNI（Podman 3.x）
+    iface podman*       # 自建网络前缀（按实际网桥名调整）
+}
+drop
+```
+
+- 网桥名以 `ip -br link` 为准，只写机器上真实存在的网桥。
+- `iface` 匹配该网桥上的**全部**流量（不是按端口），且不能与源/端口组合。
+- forward 侧会自动生成 `ct status dnat iifname "<网桥>"`，容器访问宿主发布端口的 hairpin 也覆盖。
+- rootless Podman（pasta/slirp4netns）没有宿主侧网桥/DNAT，容器访问宿主时源地址是宿主/loopback，一般不需要 `iface` 规则；被拦时按具体地址/端口放行。
+- 只想放行部分容器时不能用 `iface`（整桥生效），需按容器源地址/网段写规则，并自行维护地址变化。
+
 ## 安全默认
 
-efw 在 input/forward 两条链的**最前面**自动放行「本机 / 非 RFC1918」来源；**RFC1918 默认不放行**。Docker/Podman（rootful）存在时 `apply` 自动把其子网加入放行集合（`compile` 不探测环境，保持确定性）。
+efw 在 input/forward 两条链的**最前面**自动放行「本机 / 非 RFC1918」来源；**RFC1918 默认不放行**。容器来源**不自动放行**，需要按入口网桥写 `iface br-*` / `iface docker0`（见上节）；`compile` 与 `apply` 都不探测运行时环境。
 
 - 需要内网访问时写 `private`（独立一行，表示私有源地址）或具体网段。
-- `input` 链首默认放行 `lo`：本机访问自身公网/内网地址不受 ACL 影响；如需整卡放行/拒绝，用独立规则 `iface <网卡名>`（支持尾缀 `*`，不能与源/端口组合）。容器来源用 `iface br-*` / `iface docker0` 显式信任，不按网段放行。
+- `input` 链首默认放行 `lo`：本机访问自身公网/内网地址不受 ACL 影响；如需整卡放行/拒绝，用独立规则 `iface <网卡名>`（支持尾缀 `*`，不能与源/端口组合）。
 - `masquerade` 只做源 NAT，不改变 FORWARD 过滤：转发是否放行取决于 `ip_forward` 与主机 FORWARD 策略（efw 的 `forward` 链只处理 DNAT 流量）。
 - 伪造来源仍可能被放行；`rp_filter=0` 时建议开启反向路径过滤。
 - 完整语义、apply 流程与容器发布端口见 [部署说明](guide/deploy.md)。
