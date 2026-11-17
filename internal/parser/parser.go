@@ -24,8 +24,12 @@ const utf8BOM = "\xef\xbb\xbf"
 // portItemRe 匹配单个端口项（80 或 80-90）。
 var portItemRe = regexp.MustCompile(`^[0-9]+(-[0-9]+)?$`)
 
-// ifaceNameRe 校验网卡名：Linux 网卡名上限 15 字节，允许字母/数字/_.@-。
+// ifaceNameRe 校验真实网卡名：Linux 网卡名上限 15 字节，允许字母/数字/_.@-。
 var ifaceNameRe = regexp.MustCompile(`^[A-Za-z0-9_.@-]{1,15}$`)
+
+// ifacePatternRe 是 iface 规则可用的网卡名/通配符：允许尾缀 *（nft iifname 通配符），
+// 例如 "br-*"、"docker*"；masquerade 的出接口仍用 ifaceNameRe 严格校验。
+var ifacePatternRe = regexp.MustCompile(`^[A-Za-z0-9_.@-]{1,14}\*?$`)
 
 // directiveNames 是文件头指令名。
 var directiveNames = map[string]struct{}{
@@ -555,8 +559,8 @@ func (p *parser) parseIfaceRule(lineNo int, rawLine, text string, verdict ir.Ver
 		return
 	}
 	name := fields[1]
-	if !ifaceNameRe.MatchString(name) {
-		p.semanticErr(lineNo, "网卡名 %q 不合法（允许字母/数字/_.@-，长度 1-15）", name)
+	if !ifacePatternRe.MatchString(name) {
+		p.semanticErr(lineNo, "网卡名 %q 不合法（允许字母/数字/_.@-，可带尾缀 *，长度 1-15）", name)
 		return
 	}
 

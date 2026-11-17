@@ -35,6 +35,27 @@ var (
 	baseInternal6 = []string{"::1", "fc00::/7", "fe80::/10"}
 )
 
+// compatPriorities 是 nft <1.0 唯一接受的数字 priority。
+var compatPriorities = map[string]string{
+	"raw":      "-300",
+	"mangle":   "-150",
+	"filter":   "0",
+	"security": "50",
+	"dstnat":   "-100",
+	"srcnat":   "100",
+}
+
+// renderPriority 返回产物里的 priority：兼容模式把关键字换成数字（0.8 不识别关键字）。
+func renderPriority(priority string, compat bool) string {
+	if !compat {
+		return priority
+	}
+	if number, ok := compatPriorities[strings.ToLower(priority)]; ok {
+		return number
+	}
+	return priority
+}
+
 // Options 是产物头的元信息与部署参数。
 type Options struct {
 	Table     string
@@ -46,34 +67,18 @@ type Options struct {
 	Source    string
 	Stamp     bool
 	Now       time.Time
-	// ContainerNets 是 apply 时探测到的容器运行时（Docker/Podman）网络子网，
-	// 追加到内网来源放行集合。
-	ContainerNets []string
 	// UnreachableLines 是 W1 告警涉及的行号，产物中会加 unreachable 注释。
 	UnreachableLines map[int]bool
+	// Compat 生成 nft <1.0（如 CentOS 7 的 0.8）兼容产物：
+	// priority 输出数字，省略协议的端口规则拆成 tcp/udp（0.8 不支持 th）。
+	Compat bool
 }
 
 // internalSourceSets 生成 input/forward 最前面的来源放行集合：
 // 默认含 CGNAT/loopback/link-local 与 IPv6 ULA/link-local/回环；
-// RFC1918 不默认放行，只有容器运行时探测到的子网会追加。
-func internalSourceSets(containerNets []string) (string, string) {
-	v4 := append([]string(nil), baseInternal4...)
-	v6 := append([]string(nil), baseInternal6...)
-	seen := make(map[string]struct{}, len(containerNets))
-	for _, net := range containerNets {
-		if _, ok := seen[net]; ok {
-			continue
-		}
-		seen[net] = struct{}{}
-		if strings.Contains(net, ":") {
-			v6 = append(v6, net)
-		} else {
-			v4 = append(v4, net)
-		}
-	}
-	sort.Strings(v4)
-	sort.Strings(v6)
-	return "{ " + strings.Join(v4, ", ") + " }", "{ " + strings.Join(v6, ", ") + " }"
+// RFC1918 不默认放行，容器来源由 ACL 里的 `iface br-*` / `iface docker0` 显式信任。
+func internalSourceSets() (string, string) {
+	return "{ " + strings.Join(baseInternal4, ", ") + " }", "{ " + strings.Join(baseInternal6, ", ") + " }"
 }
 
 // Render 渲染完整可加载的 ruleset。同一输入与选项必须产出字节级相同结果。
@@ -120,7 +125,7 @@ func Render(f *ir.File, plan optimize.Plan, opts Options) []byte {
 
 func renderChain(b *strings.Builder, f *ir.File, plan optimize.Plan, opts Options, name, hook, priority string, forward bool) {
 	fmt.Fprintf(b, "%schain %s {\n", indentSet, name)
-	fmt.Fprintf(b, "%stype filter hook %s priority %s; policy accept;\n", indentChain, hook, priority)
+	fmt.Fprintf(b, "%stype filter hook %s priority %s; policy accept;\n", indentChain, hook, renderPriority(priority, opts.Compat))
 	b.WriteString("\n")
 
 	if forward {
@@ -130,8 +135,8 @@ func renderChain(b *strings.Builder, f *ir.File, plan optimize.Plan, opts Option
 		fmt.Fprintf(b, "%s# auto: 本机回环放行（本机访问自身地址也走 lo）\n", indentChain)
 		fmt.Fprintf(b, "%siifname \"lo\" accept\n\n", indentChain)
 	}
-	internal4, internal6 := internalSourceSets(opts.ContainerNets)
-	fmt.Fprintf(b, "%s# auto: 本机/CGNAT/link-local 来源放行（RFC1918 默认不放；容器网段按 apply 探测）\n", indentChain)
+	internal4, internal6 := internalSourceSets()
+	fmt.Fprintf(b, "%s# auto: 本机/CGNAT/link-local 来源放行（RFC1918 默认不放；容器来源由 iface 规则显式信任）\n", indentChain)
 	fmt.Fprintf(b, "%sip saddr %s accept\n", indentChain, internal4)
 	fmt.Fprintf(b, "%sip6 saddr %s accept\n\n", indentChain, internal6)
 	if f.Established {
@@ -149,7 +154,7 @@ func renderChain(b *strings.Builder, f *ir.File, plan optimize.Plan, opts Option
 		if i > 0 {
 			b.WriteString("\n")
 		}
-		renderRule(b, rule, opts.LogPrefix, opts.UnreachableLines, forward)
+		renderRule(b, rule, opts.LogPrefix, opts.UnreachableLines, forward, opts.Compat)
 	}
 
 	fmt.Fprintf(b, "%s}\n", indentSet)
@@ -199,14 +204,14 @@ func masqueradeTexts(entry ir.Masquerade) []string {
 	return []string{fmt.Sprintf("%s saddr %s oifname %q masquerade", family, entry.Src.Value, entry.Iface)}
 }
 
-func renderRule(b *strings.Builder, r optimize.Rule, logPrefix string, unreachable map[int]bool, forward bool) {
+func renderRule(b *strings.Builder, r optimize.Rule, logPrefix string, unreachable map[int]bool, forward, compat bool) {
 	for i := range r.Lines {
 		fmt.Fprintf(b, "%s# %d: %s\n", indentChain, r.Lines[i], strings.TrimSpace(r.Raws[i]))
 		if unreachable[r.Lines[i]] {
 			fmt.Fprintf(b, "%s# W1: unreachable（与前面的规则匹配重复，不会被命中）\n", indentChain)
 		}
 	}
-	for _, text := range ruleTexts(r, logPrefix, forward) {
+	for _, text := range ruleTexts(r, logPrefix, forward, compat) {
 		fmt.Fprintf(b, "%s%s\n", indentChain, text)
 	}
 }
@@ -216,14 +221,16 @@ func renderRule(b *strings.Builder, r optimize.Rule, logPrefix string, unreachab
 // forward 链另有两类端口拆分约束（否则内核中 ct original proto-dst 会变成 invalid type）：
 //   - 协议省略 + 端口：拆成 tcp/udp 两条（proto-dst 需要显式单协议上下文）；
 //   - 端口为多个内联值/范围：拆成每条一个值/范围（内联集合 + proto-dst 无效，命名 set 有效）。
-func ruleTexts(r optimize.Rule, logPrefix string, forward bool) []string {
+func ruleTexts(r optimize.Rule, logPrefix string, forward, compat bool) []string {
+	families := []ir.Family{ir.FamilyAny}
 	if hasPrivate(r) {
-		return []string{
-			ruleText(r, logPrefix, forward, ir.FamilyIPv4),
-			ruleText(r, logPrefix, forward, ir.FamilyIPv6),
-		}
+		families = []ir.Family{ir.FamilyIPv4, ir.FamilyIPv6}
 	}
-	return familyRuleTexts(r, logPrefix, forward, ir.FamilyAny)
+	texts := make([]string, 0, len(families))
+	for _, family := range families {
+		texts = append(texts, familyRuleTexts(r, logPrefix, forward, compat, family)...)
+	}
+	return texts
 }
 
 // hasPrivate 报告规则是否用 private 作为源地址。
@@ -251,9 +258,9 @@ func masqueradeUsesPrivate(f *ir.File) bool {
 	return false
 }
 
-func familyRuleTexts(r optimize.Rule, logPrefix string, forward bool, family ir.Family) []string {
+func familyRuleTexts(r optimize.Rule, logPrefix string, forward, compat bool, family ir.Family) []string {
 	if !forward {
-		return []string{ruleText(r, logPrefix, forward, family)}
+		return inputRuleTexts(r, logPrefix, compat, family)
 	}
 	protos := []ir.Proto{r.Proto}
 	if r.Proto == ir.ProtoAny && !r.Ports.IsAny() {
@@ -275,6 +282,21 @@ func familyRuleTexts(r optimize.Rule, logPrefix string, forward bool, family ir.
 		}
 	}
 	return texts
+}
+
+// inputRuleTexts 生成入站规则文本。nft <1.0 不支持 th dport，兼容模式下把
+// 「省略协议 + 端口」拆成 tcp/udp 两条（与 forward 链的协议拆法保持一致）。
+func inputRuleTexts(r optimize.Rule, logPrefix string, compat bool, family ir.Family) []string {
+	if !compat || r.Proto != ir.ProtoAny || r.Ports.IsAny() {
+		return []string{ruleText(r, logPrefix, false, family)}
+	}
+	tcpRule, udpRule := r, r
+	tcpRule.Proto = ir.ProtoTCP
+	udpRule.Proto = ir.ProtoUDP
+	return []string{
+		ruleText(tcpRule, logPrefix, false, family),
+		ruleText(udpRule, logPrefix, false, family),
+	}
 }
 
 func ruleText(r optimize.Rule, logPrefix string, forward bool, family ir.Family) string {

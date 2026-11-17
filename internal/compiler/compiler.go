@@ -25,8 +25,8 @@ type Options struct {
 	Source    string
 	Stamp     bool
 	Now       time.Time
-	// ContainerNets 是 apply 时探测到的容器运行时（Docker/Podman）网络子网（compile 不填）。
-	ContainerNets []string
+	// Compat 生成 nft <1.0（如 CentOS 7 的 0.8）兼容产物。
+	Compat bool
 }
 
 // Compile 把 DSL 文本编译为完整 nftables ruleset。
@@ -40,6 +40,13 @@ func Compile(src []byte, opts Options) ([]byte, []errs.Warning, error) {
 	problems, warns := validate.Check(file, opts.Source)
 	if len(problems) > 0 {
 		return nil, nil, problems
+	}
+
+	// nft <1.0 / 内核 <5.2 没有 inet 族 NAT，masquerade 无法加载，直接拒绝而不是生成坏产物。
+	if opts.Compat && len(file.Masquerades) > 0 {
+		first := file.Masquerades[0]
+		return nil, nil, errs.Errors{errs.NewError(opts.Source, first.Line, 0, errs.CategorySemantic, errs.CodeSemantic,
+			"compat 模式不支持 masquerade：nft <1.0 与内核 <5.2 没有 inet 族 NAT")}
 	}
 
 	unreachable := make(map[int]bool)
@@ -60,8 +67,8 @@ func Compile(src []byte, opts Options) ([]byte, []errs.Warning, error) {
 		Source:           opts.Source,
 		Stamp:            opts.Stamp,
 		Now:              opts.Now,
-		ContainerNets:    opts.ContainerNets,
 		UnreachableLines: unreachable,
+		Compat:           opts.Compat,
 	})
 	return out, warns, nil
 }

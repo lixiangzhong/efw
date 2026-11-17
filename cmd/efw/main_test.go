@@ -47,6 +47,34 @@ func TestRun(t *testing.T) {
 		},
 		{name: "默认打印告警", args: []string{"compile"}, stdin: fallbackAcceptACL, wantExit: 0, wantStderr: "W3"},
 		{name: "quiet 抑制告警", args: []string{"compile", "--quiet"}, stdin: fallbackAcceptACL, wantExit: 0, wantStderr: ""},
+		{
+			name:       "compat 数字 priority",
+			args:       []string{"compile", "--compat"},
+			stdin:      "v6-bootstrap off\naccept { 1.1.1.1 -> 80 }\ndrop { * }\n",
+			wantExit:   0,
+			wantStdout: "priority 0;",
+		},
+		{
+			name:       "compat priority 关键字映射数字",
+			args:       []string{"compile", "--compat", "--priority", "raw"},
+			stdin:      validACL,
+			wantExit:   0,
+			wantStdout: "priority -300;",
+		},
+		{
+			name:       "默认保留 priority 关键字",
+			args:       []string{"compile"},
+			stdin:      "v6-bootstrap off\naccept { 1.1.1.1 -> 80 }\ndrop { * }\n",
+			wantExit:   0,
+			wantStdout: "priority filter;",
+		},
+		{
+			name:       "compat 拒绝 masquerade",
+			args:       []string{"compile", "--compat"},
+			stdin:      "masquerade { eth0 }\naccept { * }\n",
+			wantExit:   1,
+			wantStderr: "E102",
+		},
 	}
 
 	for _, tc := range cases {

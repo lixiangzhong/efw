@@ -4,15 +4,12 @@ package main
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
-	"net/netip"
 	"os"
 	"os/exec"
 	"regexp"
-	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -25,8 +22,13 @@ import (
 // version 是 --version 与产物头使用的版本号。
 var version = compiler.Version
 
-// nftBinary 是 apply 模式调用的 nft 命令。
-const nftBinary = "nft"
+const (
+	// nftBinary 是 apply 模式调用的 nft 命令。
+	nftBinary = "nft"
+	// nftPreferredInput 是 ruleset 传给 nft -f 的路径。nft 0.8 不接受 "-"（stdin），
+	// 但接受 /dev/stdin；该路径不可用时回退临时文件。
+	nftPreferredInput = "/dev/stdin"
+)
 
 var (
 	// identifierRe 校验 table/chain 名：nft 标识符规则。
@@ -48,6 +50,9 @@ var (
 		"element": {}, "elements": {}, "type": {}, "hook": {}, "priority": {},
 		"policy": {}, "flags": {}, "rule": {}, "rules": {},
 	}
+
+	// nftVersionRe 从 `nft --version`（如 "nftables v0.8 (Joe Btfsplk)"）提取主次版本。
+	nftVersionRe = regexp.MustCompile(`v(\d+)\.(\d+)`)
 )
 
 func main() {
@@ -147,6 +152,7 @@ func compileFlags() []cli.Flag {
 		&cli.StringFlag{Name: "chain", Value: "input", Usage: "chain 名（不能是 forward/postrouting）"},
 		&cli.StringFlag{Name: "hook", Value: "input", Usage: "hook（v1 仅支持 input）"},
 		&cli.StringFlag{Name: "priority", Value: "filter", Usage: "priority（nft 关键字或 32 位整数）"},
+		&cli.BoolFlag{Name: "compat", Usage: "兼容 nft <1.0（如 CentOS 7 的 0.8）：数字 priority、拆分 th dport、禁用 masquerade；apply 未显式指定时按本机 nft 版本自动判定"},
 		&cli.StringFlag{Name: "log-prefix", Value: "efw: ", Usage: "log 前缀（原样输出）"},
 		&cli.BoolFlag{Name: "stamp", Usage: "产物头追加生成时间"},
 		&cli.BoolFlag{Name: "quiet", Usage: "抑制 warning"},
@@ -180,6 +186,7 @@ type compileOptions struct {
 	logPrefix string
 	stamp     bool
 	quiet     bool
+	compat    bool
 }
 
 func collectOptions(cmd *cli.Command) (compileOptions, error) {
@@ -193,6 +200,7 @@ func collectOptions(cmd *cli.Command) (compileOptions, error) {
 		logPrefix: cmd.String("log-prefix"),
 		stamp:     cmd.Bool("stamp"),
 		quiet:     cmd.Bool("quiet"),
+		compat:    cmd.Bool("compat"),
 	}
 	if cmd.IsSet("output") && opts.output == "" {
 		return opts, usageErrorf("输出路径不能为空")
@@ -253,22 +261,22 @@ func readSource(opts compileOptions, positional []string, stdin io.Reader) (stri
 }
 
 // buildCompiled 读取 DSL 并完成编译，告警写到 stderr。
-func buildCompiled(opts compileOptions, priority string, positional []string, stdin io.Reader, stderr io.Writer, containerNets []string) (compileResult, error) {
+func buildCompiled(opts compileOptions, priority string, positional []string, stdin io.Reader, stderr io.Writer) (compileResult, error) {
 	source, src, err := readSource(opts, positional, stdin)
 	if err != nil {
 		return compileResult{}, err
 	}
 	ruleset, warns, compileErr := compiler.Compile(src, compiler.Options{
-		Table:         opts.table,
-		Chain:         opts.chain,
-		Hook:          strings.ToLower(opts.hook),
-		Priority:      priority,
-		LogPrefix:     opts.logPrefix,
-		Version:       version,
-		Source:        source,
-		Stamp:         opts.stamp,
-		Now:           time.Now(),
-		ContainerNets: containerNets,
+		Table:     opts.table,
+		Chain:     opts.chain,
+		Hook:      strings.ToLower(opts.hook),
+		Priority:  priority,
+		LogPrefix: opts.logPrefix,
+		Version:   version,
+		Source:    source,
+		Stamp:     opts.stamp,
+		Now:       time.Now(),
+		Compat:    opts.compat,
 	})
 	if !opts.quiet {
 		for _, warn := range warns {
@@ -303,7 +311,7 @@ func compileAction(cmd *cli.Command, positional []string, stdin io.Reader, stdou
 	if optErr != nil {
 		return &commandError{code: 2, lines: []string{optErr.Format()}}
 	}
-	result, err := buildCompiled(opts, priority, positional, stdin, stderr, nil)
+	result, err := buildCompiled(opts, priority, positional, stdin, stderr)
 	if err != nil {
 		return err
 	}
@@ -331,135 +339,29 @@ func applyAction(cmd *cli.Command, positional []string, stdin io.Reader, stderr 
 	if optErr != nil {
 		return &commandError{code: 2, lines: []string{optErr.Format()}}
 	}
-	containerNets := detectContainerNets(stderr, opts.quiet)
-	result, err := buildCompiled(opts, priority, positional, stdin, stderr, containerNets)
+	// 用户没显式指定 --compat 时，按本机 nft 版本自动判定（0.x 需要兼容产物）。
+	if !cmd.IsSet("compat") {
+		if nft, lookErr := exec.LookPath(nftBinary); lookErr == nil {
+			opts.compat = nftNeedsCompat(nft)
+		}
+	}
+	result, err := buildCompiled(opts, priority, positional, stdin, stderr)
 	if err != nil {
 		return err
 	}
 	return applyRuleset(result.ruleset, opts.table)
 }
 
-// containerRuntimes 是 apply 时探测的容器运行时；装多个时合并各自网段。
-var containerRuntimes = []string{"docker", "podman"}
-
-// detectContainerNets 在 apply 时探测本机容器运行时（Docker/Podman）的网络子网，
-// 追加到内网来源放行集合。运行时未安装时跳过；已安装但探测失败时告警并跳过该运行时（不阻断 apply）。
-func detectContainerNets(stderr io.Writer, quiet bool) []string {
-	var nets []string
-	for _, name := range containerRuntimes {
-		bin, err := exec.LookPath(name)
-		if err != nil {
-			continue
-		}
-		found, probeErr := probeNetworkNets(bin)
-		if probeErr != nil {
-			if !quiet {
-				fmt.Fprintf(stderr, "efw: 警告: %s 网络探测失败，跳过其网段：%v\n", name, probeErr)
-			}
-			continue
-		}
-		nets = append(nets, found...)
-	}
-	return normalizeNets(nets, stderr, quiet)
-}
-
-// probeNetworkNets 读取一个运行时的全部网络子网：先 `network ls -q` 取标识
-// （Docker 是 ID，Podman 是网络名，两者都可直接作为 inspect 参数），再一次性取回 JSON。
-func probeNetworkNets(bin string) ([]string, error) {
-	out, err := exec.Command(bin, "network", "ls", "-q").Output()
-	if err != nil {
-		return nil, fmt.Errorf("无法列出网络：%w", err)
-	}
-	ids := strings.Fields(string(out))
-	if len(ids) == 0 {
-		return nil, nil
-	}
-	out, err = exec.Command(bin, append([]string{"network", "inspect"}, ids...)...).Output()
-	if err != nil {
-		return nil, fmt.Errorf("无法读取网络子网：%w", err)
-	}
-	var networks []networkInspect
-	if err := json.Unmarshal(out, &networks); err != nil {
-		return nil, fmt.Errorf("无法解析网络信息：%w", err)
-	}
-	var nets []string
-	for _, network := range networks {
-		for _, config := range network.IPAM.Config {
-			nets = append(nets, config.Subnet)
-		}
-		for _, subnet := range network.Subnets {
-			nets = append(nets, subnet.Subnet)
-		}
-		for _, plugin := range network.Plugins {
-			for _, ranges := range plugin.IPAM.Ranges {
-				for _, item := range ranges {
-					nets = append(nets, item.Subnet)
-				}
-			}
-		}
-	}
-	return nets, nil
-}
-
-// networkInspect 只保留三种输出形状中的子网字段：
-//   - Docker：IPAM.Config[].Subnet
-//   - Podman/netavark：Subnets[].Subnet
-//   - Podman/CNI（3.x）：Plugins[].IPAM.Ranges[][].Subnet
-//
-// JSON 键大小写不敏感，Docker 的 "Subnet" 与 Podman 的 "subnet" 共用同一个标签。
-type networkInspect struct {
-	IPAM struct {
-		Config []struct {
-			Subnet string `json:"subnet"`
-		} `json:"config"`
-	} `json:"ipam"`
-	Subnets []struct {
-		Subnet string `json:"subnet"`
-	} `json:"subnets"`
-	Plugins []struct {
-		IPAM struct {
-			Ranges [][]struct {
-				Subnet string `json:"subnet"`
-			} `json:"ranges"`
-		} `json:"ipam"`
-	} `json:"plugins"`
-}
-
-// normalizeNets 校验探测到的子网：忽略非法值、去重并排序，保证产物确定性。
-func normalizeNets(nets []string, stderr io.Writer, quiet bool) []string {
-	seen := make(map[string]struct{}, len(nets))
-	valid := make([]string, 0, len(nets))
-	for _, net := range nets {
-		net = strings.TrimSpace(net)
-		if net == "" {
-			continue
-		}
-		if _, err := netip.ParsePrefix(net); err != nil {
-			if !quiet {
-				fmt.Fprintf(stderr, "efw: 警告: 忽略无法解析的容器网段 %q\n", net)
-			}
-			continue
-		}
-		if _, ok := seen[net]; ok {
-			continue
-		}
-		seen[net] = struct{}{}
-		valid = append(valid, net)
-	}
-	sort.Strings(valid)
-	return valid
-}
-
 // applyRuleset 校验后原子替换 table：
 //   - 表存在：同一 nft 批次内 delete + create（失败时旧表保持不变）；
 //   - 表不存在：直接 create。
+//
+// 校验必须针对最终批次（含 delete）：nft 0.8 的 `-c` 会按真实内核状态评估，
+// 只校验不含 delete 的原始规则时，二次 apply 会报 "File exists"。
 func applyRuleset(ruleset []byte, table string) error {
 	nft, err := exec.LookPath(nftBinary)
 	if err != nil {
 		return applyErrorf("找不到 %s 命令（应用规则需要 nftables）", nftBinary)
-	}
-	if out, checkErr := runNft(nft, []string{"-c", "-f", "-"}, ruleset); checkErr != nil {
-		return applyErrorf("nft 校验失败：%s", nftOutput(out, checkErr))
 	}
 	exists, err := nftTableExists(nft, table)
 	if err != nil {
@@ -470,22 +372,77 @@ func applyRuleset(ruleset []byte, table string) error {
 	if exists {
 		batch = append([]byte("delete table inet "+table+"\n"), ruleset...)
 	}
-	if out, applyErr := runNft(nft, []string{"-f", "-"}, batch); applyErr != nil {
+	inputPath, cleanup, err := nftInputPath(batch, nftPreferredInput)
+	if err != nil {
+		return applyErrorf("无法准备 nft 输入：%v", err)
+	}
+	defer cleanup()
+	if out, checkErr := runNft(nft, []string{"-c", "-f", inputPath}, batch); checkErr != nil {
+		return applyErrorf("nft 校验失败：%s", nftOutput(out, checkErr))
+	}
+	if out, applyErr := runNft(nft, []string{"-f", inputPath}, batch); applyErr != nil {
 		return applyErrorf("nft 应用失败（旧表保持不变）：%s", nftOutput(out, applyErr))
 	}
 	return nil
 }
 
-// nftTableExists 通过 nft list 判断 table 是否已存在。
+// nftInputPath 返回把 ruleset 交给 nft -f 的路径。
+// nft 0.8 不接受 "-"（stdin），但接受 /dev/stdin；preferred 不可用时退回 0600 临时文件。
+func nftInputPath(ruleset []byte, preferred string) (string, func(), error) {
+	if preferred != "" {
+		if _, err := os.Stat(preferred); err == nil {
+			return preferred, func() {}, nil
+		}
+	}
+	file, err := os.CreateTemp("", "efw-*.nft")
+	if err != nil {
+		return "", nil, err
+	}
+	path := file.Name()
+	if _, err := file.Write(ruleset); err != nil {
+		_ = file.Close()
+		_ = os.Remove(path)
+		return "", nil, err
+	}
+	if err := file.Close(); err != nil {
+		_ = os.Remove(path)
+		return "", nil, err
+	}
+	return path, func() { _ = os.Remove(path) }, nil
+}
+
+// nftNeedsCompat 报告 nft 是否属于 <1.0 的老版本（如 CentOS 7 的 0.8）：
+// 这类版本只接受数字 priority，且不支持 th dport。
+func nftNeedsCompat(nft string) bool {
+	out, err := exec.Command(nft, "--version").Output()
+	if err != nil {
+		return false
+	}
+	match := nftVersionRe.FindStringSubmatch(string(out))
+	if len(match) != 3 {
+		return false
+	}
+	major, err := strconv.Atoi(match[1])
+	if err != nil {
+		return false
+	}
+	return major < 1
+}
+
+// nftTableExists 通过 nft list tables 判断 table 是否已存在。
+// 不依赖缺表错误文案：nft 0.8 是 "Table 'x' does not exist"，nft 1.x 是 "No such file or directory"。
 func nftTableExists(nft, table string) (bool, error) {
-	out, err := runNft(nft, []string{"list", "table", "inet", table}, nil)
-	if err == nil {
-		return true, nil
+	out, err := runNft(nft, []string{"list", "tables"}, nil)
+	if err != nil {
+		return false, applyErrorf("探测 table inet %s 失败：%s", table, nftOutput(out, err))
 	}
-	if strings.Contains(out, "No such file or directory") {
-		return false, nil
+	for _, line := range strings.Split(out, "\n") {
+		fields := strings.Fields(line)
+		if len(fields) == 3 && fields[0] == "table" && fields[1] == "inet" && fields[2] == table {
+			return true, nil
+		}
 	}
-	return false, applyErrorf("探测 table inet %s 失败：%s", table, nftOutput(out, err))
+	return false, nil
 }
 
 func runNft(nft string, args []string, stdin []byte) (string, error) {

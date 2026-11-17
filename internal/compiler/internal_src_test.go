@@ -3,12 +3,10 @@ package compiler_test
 import (
 	"strings"
 	"testing"
-
-	"github.com/lixiangzhong/efw/internal/compiler"
 )
 
 // TestInternalSourceBypass 默认只放行 loopback/CGNAT/link-local 与 IPv6 ULA/link-local；
-// RFC1918 不默认放行，容器运行时网段通过 Options.ContainerNets 注入。
+// RFC1918 不默认放行；容器来源由 ACL 里的 `iface br-*` / `iface docker0` 显式信任。
 func TestInternalSourceBypass(t *testing.T) {
 	out := string(compileOK(t, "v6-bootstrap off\naccept { 8.8.8.8 -> 8080 }\ndrop { * }\n"))
 	for _, want := range []string{
@@ -38,24 +36,5 @@ func TestInternalSourceBypass(t *testing.T) {
 	line := "ip saddr { 100.64.0.0/10, 127.0.0.0/8, 169.254.0.0/16 } accept"
 	if !strings.Contains(fwd, line) || strings.Contains(fwd, "ct status dnat "+line) {
 		t.Fatalf("forward 内网放行不应带 ct status dnat:\n%s", fwd)
-	}
-}
-
-// TestContainerNetworksInjected apply 探测到的容器运行时网段应追加到放行集合。
-func TestContainerNetworksInjected(t *testing.T) {
-	opts := testOptions("<test>")
-	opts.ContainerNets = []string{"172.17.0.0/16", "fd00:dead::/64", "172.17.0.0/16"}
-	out, _, err := compiler.Compile([]byte("v6-bootstrap off\naccept { 8.8.8.8 -> 8080 }\ndrop { * }\n"), opts)
-	if err != nil {
-		t.Fatalf("编译失败: %v", err)
-	}
-	text := string(out)
-	for _, want := range []string{
-		"ip saddr { 100.64.0.0/10, 127.0.0.0/8, 169.254.0.0/16, 172.17.0.0/16 } accept",
-		"ip6 saddr { ::1, fc00::/7, fd00:dead::/64, fe80::/10 } accept",
-	} {
-		if n := strings.Count(text, want); n != 2 { // input + forward
-			t.Fatalf("%q 应出现 2 次，实际 %d\n%s", want, n, text)
-		}
 	}
 }
