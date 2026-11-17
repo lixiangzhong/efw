@@ -44,17 +44,20 @@ go build -o efw ./cmd/efw
 
 要求 Go 1.27+；唯一的第三方依赖是 CLI 框架 [urfave/cli v3](https://github.com/urfave/cli)，编译链路保持标准库。CLI 内置 `efw help` 与 `efw version`（等价 `--version`）。
 
-### 旧版 nft（<1.0，如 CentOS 7 的 0.8）
+### 旧版 nft（<1.0，如 CentOS 7 的 nft 0.8）
 
-nft 0.8 只接受数字 priority、不支持 `th dport` 与 `nft -f -`。`apply` 会按 `nft --version` 自动识别 0.x；`compile` 需要显式加 `--compat`：
+`efw` 只面向现代 nft（≥1.0）。CentOS 7 这类 nft 0.8 环境用独立命令 **`efw-nft08`**：同一份 DSL，产物固定为 0.8 方言，不再需要 `--compat`：
 
 ```bash
-efw apply rules.acl              # 0.x 上自动使用兼容产物
-efw apply --compat rules.acl     # 显式指定
-efw compile --compat -o rules.nft rules.acl
+go build -o efw-nft08 ./cmd/efw-nft08      # 或使用 Release 里的 efw-nft08_<version>_linux_amd64
+
+efw-nft08 compile -o rules.nft rules.acl
+efw-nft08 apply rules.acl
 ```
 
-compat 产物把 priority 写成数字、把「省略协议 + 端口」拆成 tcp/udp 两条；**masquerade 不可用**（inet 族 NAT 需内核 ≥5.2），出现时直接报 `E102`。nft 0.8 的 `ct original` 实测可用，Docker 发布端口的 forward 链不受影响。
+`/etc/fw.sh` 首行相应写成 `#!/usr/local/bin/efw-nft08 apply`。
+
+`efw-nft08` 会把 priority 写成数字、把「省略协议 + 端口」拆成 tcp/udp 两条；**masquerade 不可用**（inet 族 NAT 需内核 ≥5.2），出现时直接报 `E102`。nft 0.8 的 `ct original` 实测可用，Docker 发布端口的 forward 链不受影响；容器来源同样用 `iface br-*` / `iface docker0` 显式放行。
 
 ## 快速开始
 
