@@ -56,12 +56,16 @@ jobs:
         run: |
           set -euo pipefail
           version="${GITHUB_REF_NAME#v}"
-          name="efw_${version}_${GOOS}_${GOARCH}"
+          modern="efw_${version}_${GOOS}_${GOARCH}"
+          legacy="efw-nft08_${version}_${GOOS}_${GOARCH}"
           mkdir -p dist
           go build -trimpath \
             -ldflags "-s -w -X github.com/lixiangzhong/efw/internal/compiler.Version=${version}" \
-            -o "dist/${name}" ./cmd/efw
-          ( cd dist && sha256sum "${name}" > "checksums-${GOOS}-${GOARCH}.txt" )
+            -o "dist/${modern}" ./cmd/efw
+          go build -trimpath \
+            -ldflags "-s -w -X github.com/lixiangzhong/efw/internal/compiler.Version=${version}" \
+            -o "dist/${legacy}" ./cmd/efw-nft08
+          ( cd dist && sha256sum "${modern}" "${legacy}" > "checksums-${GOOS}-${GOARCH}.txt" )
       - uses: actions/upload-artifact@v4
         with:
           name: efw-${{ matrix.goos }}-${{ matrix.goarch }}
