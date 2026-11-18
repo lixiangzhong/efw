@@ -51,23 +51,27 @@ cat rules.acl | efw apply      # stdin
 - 与 `/etc/fw.sh` 的差异：efw 默认全局生效（可用独立 `iface <网卡名>` 规则按入口网卡整卡放行/拒绝），也不使用 ipset。
 - shebang 用法：`#!/usr/local/bin/efw apply`；`rc.local` 直接调用同一文件即可开机重建。想沿用 `/etc/fw.sh` 的习惯，把 ACL 写到 `/etc/fw.sh`、首行加同一 shebang 并 `chmod +x`，之后照旧「编辑 → 执行」。
 
-## 只拦截外部来源（默认全局，可按网卡限定）
+## 默认零来源信任（只放行 loopback）
 
-efw 在 input/forward 两条链的**最前面**自动放行「本机 / 非 RFC1918」来源：
+efw 在 input 链首**只**自动放行 loopback，不做任何来源网段的内置信任：
 
 ```nft
 iifname "lo" accept
-ip  saddr { 100.64.0.0/10, 127.0.0.0/8, 169.254.0.0/16 } accept
-ip6 saddr { ::1, fc00::/7, fe80::/10 } accept
 ```
 
 - **默认放行 `lo`**：input 链首生成 `iifname "lo" accept`，本机访问自身公网/内网地址不再需要把自身 IP 写进 ACL；forward 链不生成（本机流量不经过 forward）。
-- **RFC1918（`10.0.0.0/8`、`172.16.0.0/12`、`192.168.0.0/16`）默认不放行**；需要内网访问时写 `private`（独立一行，私有源地址）或具体网段（例如 DB 客户端连本机 MariaDB）。
-- **容器来源不按网段放行**：efw 不再探测 Docker/Podman 网段；需要信任容器时在 ACL 显式写 `iface br-*`（Docker 自定义网络）和 `iface docker0`（默认 bridge），按入口网桥判定，Docker 换地址池也不受影响。
+- **其余来源全部走 ACL**：RFC1918（`10.0.0.0/8`、`172.16.0.0/12`、`192.168.0.0/16`）、CGNAT（`100.64.0.0/10`，常见于 Tailscale/云 VPC）、IPv4/IPv6 link-local、IPv6 ULA（`fc00::/7`，Docker 开 IPv6 时的容器地址池）都不再隐式放行，需要时显式写：
+  - 内网：`private`（独立一行，RFC1918 + ULA）或具体网段（例如 DB 客户端连本机 MariaDB）；
+  - Tailscale/VPN：`iface tailscale0`（按 `ip -br link` 的实际网卡名，也可写 `tailscale*`）；
+  - 容器：`iface br-*` + `iface docker0`（见 README「容器访问宿主机」）。
+- **容器来源不按网段放行**：efw 不探测 Docker/Podman 网段；需要信任容器时在 ACL 显式写 `iface br-*`（Docker 自定义网络）和 `iface docker0`（默认 bridge），按入口网桥判定，Docker 换地址池也不受影响。
 - `iface` 生成 `iifname "<name>"`，input 与 forward 都生效；forward 侧是 `ct status dnat iifname "<name>"`，所以容器→宿主发布端口（hairpin）也能放行。
 - rootless Podman 没有宿主侧 DNAT（pasta/slirp4netns + 用户态端口转发）：发布端口由宿主进程监听，落在 input 链的端口 ACL 里；容器访问宿主服务的源地址是宿主地址或 loopback，若被拦需在 ACL 显式放行。
 - 需要按入口网卡整卡放行/拒绝时，单独写一条 `iface <网卡名>` 规则（支持尾缀 `*` 通配，如 `iface br-*`；可加 `log`；不能与源/端口组合）；不写 iface 即不限定，多网卡/网卡改名都不影响。
-- 残余风险：伪造来源仍可能被放行；`rp_filter=0` 时建议开启反向路径过滤（`sysctl -w net.ipv4.conf.all.rp_filter=1`）。
+- **IPv6 基础流量**：兜底为 `drop`/`reject` 时 `v6-bootstrap auto` 会自动放行 NDP（RS/RA/NS/NA）、MLD 查询、ICMPv6 错误报文（含 PMTUD 依赖的 packet-too-big）与 DHCPv6。链路本地来源不再被隐式信任后，这些是 IPv6 的底座；`v6-bootstrap off` 时必须自己放行，否则邻居解析、组播成员关系和大包传输会断。
+- 残余风险：显式放行的来源仍可能被伪造；`rp_filter=0` 时建议开启反向路径过滤（`sysctl -w net.ipv4.conf.all.rp_filter=1`）。
+
+> Tailscale 的 `ts-input` 链对 `100.64.0.0/10` 的 accept **不是终结动作**，同 hook 上 efw 的兜底 `drop` 仍然生效：tailnet 访问必须在 ACL 里显式写 `iface tailscale0`，不能依赖 Tailscale 自己的规则。
 
 ## 容器发布端口（forward 链）
 

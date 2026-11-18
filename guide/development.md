@@ -33,7 +33,7 @@ go test ./...
 ```
 
 - 黄金文件：`testdata/golden/`（现代方言）与 `testdata/golden-nft08/`（nft 0.8 方言），均为 `.acl` 输入 + `.nft` 期望产物，逐字节比对。
-- nft08 黄金文件需要重生成时：`REGEN_GOLDEN=1 go test ./internal/legacy -run TestGoldenNft08`。
+- 需要重生成时：`REGEN_GOLDEN=1 go test ./internal/compiler ./internal/legacy`（改动产物格式后必须重跑并人工过一遍 diff）。
 - 集成校验：环境里有 `nft` 时自动跑 `nft -c -f`，否则跳过。无 Linux 主机时可用容器（只需 `CAP_NET_ADMIN`；容器内核/Debian 12 镜像里的 nft 1.0.6 与目标环境一致；nft 0.8 方言需在 CentOS 7 等目标环境验证）：
 
 ```bash

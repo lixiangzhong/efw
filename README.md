@@ -4,7 +4,7 @@
 
 - 默认纯离线编译；`efw apply` 编译后直接原子应用到内核，重复执行即覆盖。
 - 覆盖入站（`input`）与容器发布端口（`forward`，仅 DNAT 流量，Docker/Podman）；可选 `masquerade` 出站源 NAT（`postrouting`），按源地址/出接口匹配。`table inet` 双栈。
-- **只拦截外部来源**：默认放行 loopback/CGNAT/link-local 与 IPv6 ULA/link-local，RFC1918 默认不放；容器来源用 ACL 的 `iface br-*` / `iface docker0` 显式信任（`apply` 不再探测运行时网段）。`input` 链首默认放行 `lo`；需要整卡放行/拒绝时写独立规则 `iface <网卡名>`。
+- **默认零来源信任**：链首只放行 `iifname "lo"`；RFC1918、CGNAT、IPv4/IPv6 link-local、IPv6 ULA 都不隐式放行，内网/Tailscale/容器来源一律在 ACL 里显式写 `private`、网段或 `iface <网卡名>`（容器用 `iface br-*` / `iface docker0`，`apply` 不探测运行时网段）。IPv6 的 NDP/MLD/ICMPv6 错误与 DHCPv6 由 `v6-bootstrap` 兜底。
 
 设计细节、错误码与验收标准见本地 SPEC.md（不纳入版本库），本文只讲怎么用。
 
@@ -121,7 +121,7 @@ nft -f rules.nft      # 真正生效
 
 ```text
 established auto|off               # 默认 auto：链首放行已建立连接
-v6-bootstrap auto|off              # 默认 auto：兜底为 drop/reject 时放行 IPv6 NDP/DHCPv6
+v6-bootstrap auto|off              # 默认 auto：兜底为 drop/reject 时放行 IPv6 NDP/MLD/ICMPv6 错误与 DHCPv6
 
 accept { <规则> }                  # 块内省略 action，继承块动作
 drop { <规则> }                    # 同上（reject 同理）
@@ -203,16 +203,17 @@ drop
 
 ## 安全默认
 
-efw 在 input/forward 两条链的**最前面**自动放行「本机 / 非 RFC1918」来源；**RFC1918 默认不放行**。容器来源**不自动放行**，需要按入口网桥写 `iface br-*` / `iface docker0`（见上节）；`compile` 与 `apply` 都不探测运行时环境。
+`input` 链首**只**自动放行 `iifname "lo"`：本机访问自身公网/内网地址不受 ACL 影响，其余来源一律走 ACL。**没有任何来源网段是隐式信任的**——RFC1918、CGNAT（`100.64.0.0/10`）、IPv4/IPv6 link-local、IPv6 ULA 都要显式写规则；容器来源用 `iface br-*` / `iface docker0`（见上节）。`compile` 与 `apply` 都不探测运行时环境。
 
-- 需要内网访问时写 `private`（独立一行，表示私有源地址）或具体网段。
-- `input` 链首默认放行 `lo`：本机访问自身公网/内网地址不受 ACL 影响；如需整卡放行/拒绝，用独立规则 `iface <网卡名>`（支持尾缀 `*`，不能与源/端口组合）。
+- 内网访问写 `private`（独立一行，RFC1918 + ULA）或具体网段；Tailscale 这类 VPN 写 `iface tailscale0`（按 `ip -br link` 的实际网卡名，也可写 `tailscale*`）。
+- 如需整卡放行/拒绝，用独立规则 `iface <网卡名>`（支持尾缀 `*`，不能与源/端口组合）。
+- IPv6 基础流量（NDP、MLD、ICMPv6 错误含 PMTUD）与 DHCPv6 由 `v6-bootstrap auto` 在兜底为 `drop`/`reject` 时自动放行；`v6-bootstrap off` 时要自己保证这些类型可达，否则 IPv6 邻居解析与大包传输会断。
 - `masquerade` 只做源 NAT，不改变 FORWARD 过滤：转发是否放行取决于 `ip_forward` 与主机 FORWARD 策略（efw 的 `forward` 链只处理 DNAT 流量）。
-- 伪造来源仍可能被放行；`rp_filter=0` 时建议开启反向路径过滤。
+- 显式放行的来源仍可能被伪造；`rp_filter=0` 时建议开启反向路径过滤。
 - 完整语义、apply 流程与容器发布端口见 [部署说明](guide/deploy.md)。
 
 ## 文档
 
 - [DSL 参考](guide/dsl.md)：语法、简写、动作块与边界
-- [部署说明](guide/deploy.md)：部署参数、apply、内网来源、容器 forward
+- [部署说明](guide/deploy.md)：部署参数、apply、内网/Tailscale 显式放行、容器 forward
 - [开发与发布](guide/development.md)：Actions 发布流程、测试、v1 不做
