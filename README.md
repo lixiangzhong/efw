@@ -20,7 +20,7 @@ wget -qO- https://raw.githubusercontent.com/lixiangzhong/efw/main/install.sh | s
 
 ```bash
 # 指定版本 / 安装目录
-curl -fsSL https://raw.githubusercontent.com/lixiangzhong/efw/main/install.sh | VERSION=v1.5.0 sh
+curl -fsSL https://raw.githubusercontent.com/lixiangzhong/efw/main/install.sh | VERSION=v1.6.0 sh
 curl -fsSL https://raw.githubusercontent.com/lixiangzhong/efw/main/install.sh | BINDIR="$HOME/.local/bin" sh
 ```
 
@@ -36,7 +36,7 @@ curl -fsSL https://raw.githubusercontent.com/lixiangzhong/efw/main/install.sh | 
 curl -fsSL https://gh-proxy.com/https://raw.githubusercontent.com/lixiangzhong/efw/main/install_cn.sh | sh
 ```
 
-镜像顺序：`gh-proxy.com`、`ghfast.top`、`ghproxy.net`、`gh-proxy.org`、`github.cnxiaobai.com`、`gh.noki.eu.org`。个别镜像不代理 `api.github.com`，版本探测失败时用 `VERSION=v1.5.0` 指定。SHA256 只能防传输损坏、无法防镜像投毒，介意请安装后与官方 Release 比对。
+镜像顺序：`gh-proxy.com`、`ghfast.top`、`ghproxy.net`、`gh-proxy.org`、`github.cnxiaobai.com`、`gh.noki.eu.org`。个别镜像不代理 `api.github.com`，版本探测失败时用 `VERSION=v1.6.0` 指定。SHA256 只能防传输损坏、无法防镜像投毒，介意请安装后与官方 Release 比对。
 
 从源码构建：
 
