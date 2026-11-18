@@ -128,13 +128,14 @@ drop { <规则> }                    # 同上（reject 同理）
 accept { * } / drop { * }          # 兜底：匹配一切，必须最后一条（可简写为 accept / drop）
 iface <name|prefix*> [log]         # 整卡规则：该入口网卡上的全部流量（动作继承块头；支持尾缀 *）
 private                            # 独立一行：私有源地址（RFC1918 + RFC4193 ULA）
+NAME { <IP|CIDR> ... }             # 命名集合：v4/v6 可混写，产物拆成 NAME_v4/NAME_v6（仅作源地址）
 masquerade { <出接口> | <源地址> -> <出接口> }   # 出站源 NAT（内核 ≥5.2）
 # <规则> = [proto] src [proto] -> [dst] [port]    # proto 可出现在匹配部分任意位置
 ```
 
 | 字段 | 取值 |
 |:--|:--|
-| `src` / `dst` | IPv4/IPv6 字面量、CIDR、`*` |
+| `src` / `dst` | IPv4/IPv6 字面量、CIDR、`*`；`src` 还支持命名集合名 |
 | `private` | 私有源地址集合：IPv4 RFC1918（`10.0.0.0/8`、`172.16.0.0/12`、`192.168.0.0/16`）+ IPv6 ULA（`fc00::/7`）；**只能单独成行**（可加 `log`） |
 | `iface` | 入口网卡名（`eth0`、`ens3`；独立成规则 `iface eth0`，≤15 字符；支持尾缀 `*` 通配，如 `iface br-*`、`iface docker*`） |
 | `proto` | `tcp`、`udp`、`icmp`（双栈）；`tcp4`/`tcp6`/`udp4`/`udp6`/`icmp4`/`icmp6`（单栈）；省略 = 任意协议 |
@@ -201,11 +202,33 @@ drop
 - rootless Podman（pasta/slirp4netns）没有宿主侧网桥/DNAT，容器访问宿主时源地址是宿主/loopback，一般不需要 `iface` 规则；被拦时按具体地址/端口放行。
 - 只想放行部分容器时不能用 `iface`（整桥生效），需按容器源地址/网段写规则，并自行维护地址变化。
 
+## 命名集合（地址列表复用）
+
+```text
+WHITELIST {
+    203.0.113.10
+    198.51.100.0/25
+    2001:db8::1
+}
+
+accept {
+    @WHITELIST -> 22 443
+}
+```
+
+- 定义块头写裸名字（`WHITELIST {`），**引用必须写 `@`**（`@WHITELIST`）；漏写会报「命名集合引用要加 @ 前缀」。`@` 只用于引用。
+- 一个块里**可以混写 IPv4/IPv6**；nft 的 set 是单地址族的，产物自动拆成 `WHITELIST_v4` / `WHITELIST_v6`，规则按族展开成 1~2 条。
+- 元素在编译期去重并归并重叠/相邻区间（nft interval set 不允许重叠，否则 `conflicting intervals specified`）；`1.1.1.0/25` + `1.1.1.22` 会归并成一个 `/25`。
+- 引用只作**源地址**：`@WHITELIST`、`@WHITELIST -> 80 443`、`drop { @WHITELIST -> 22 }`；不能当目的地址。
+- 未定义引用、重复定义、保留字、空集合都报错；未被引用的集合告警 W4 且不产出。
+- 名称 `[A-Za-z_][A-Za-z0-9_]*`，最长 32，**区分大小写**；`set`/`private`/`accept` 等关键字不能作名字。
+- `@ABC tcp4 -> 22` 这类钉死地址族的规则只展开匹配的族，不产生永不命中的规则。
+
 ## 安全默认
 
 `input` 链首**只**自动放行 `iifname "lo"`：本机访问自身公网/内网地址不受 ACL 影响，其余来源一律走 ACL。**没有任何来源网段是隐式信任的**——RFC1918、CGNAT（`100.64.0.0/10`）、IPv4/IPv6 link-local、IPv6 ULA 都要显式写规则；容器来源用 `iface br-*` / `iface docker0`（见上节）。`compile` 与 `apply` 都不探测运行时环境。
 
-- 内网访问写 `private`（独立一行，RFC1918 + ULA）或具体网段；Tailscale 这类 VPN 写 `iface tailscale0`（按 `ip -br link` 的实际网卡名，也可写 `tailscale*`）。
+- 内网访问写 `private`（独立一行，RFC1918 + ULA）、具体网段或命名集合；Tailscale 这类 VPN 写 `iface tailscale0`（按 `ip -br link` 的实际网卡名，也可写 `tailscale*`）。
 - 如需整卡放行/拒绝，用独立规则 `iface <网卡名>`（支持尾缀 `*`，不能与源/端口组合）。
 - IPv6 基础流量（NDP、MLD、ICMPv6 错误含 PMTUD）与 DHCPv6 由 `v6-bootstrap auto` 在兜底为 `drop`/`reject` 时自动放行；`v6-bootstrap off` 时要自己保证这些类型可达，否则 IPv6 邻居解析与大包传输会断。
 - `masquerade` 只做源 NAT，不改变 FORWARD 过滤：转发是否放行取决于 `ip_forward` 与主机 FORWARD 策略（efw 的 `forward` 链只处理 DNAT 流量）。
