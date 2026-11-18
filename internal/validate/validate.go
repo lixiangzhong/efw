@@ -2,14 +2,94 @@
 package validate
 
 import (
+	"strings"
+
 	"github.com/lixiangzhong/efw/internal/errs"
 	"github.com/lixiangzhong/efw/internal/ir"
 )
+
+// reservedSetNames 是不能用作命名集合名的保留字（小写比较）：DSL 关键字、
+// nft 结构关键字，以及产物里的内置链名/集合名。
+var reservedSetNames = map[string]struct{}{
+	"accept": {}, "drop": {}, "reject": {}, "log": {}, "iface": {},
+	"private": {}, "masquerade": {}, "established": {}, "v6-bootstrap": {},
+	"forward": {}, "auto": {}, "off": {}, "default": {}, "set": {},
+	"table": {}, "chain": {}, "type": {}, "hook": {}, "priority": {},
+	"policy": {}, "elements": {}, "flags": {}, "interval": {},
+	"input": {}, "postrouting": {}, "private4": {}, "private6": {},
+}
+
+// resolveSets 校验命名集合定义、解析引用并把地址族回填到规则上；
+// 同时给出未使用集合告警（W4）。引用必须在使用前完成解析，否则生成阶段无法选 ip/ip6。
+func resolveSets(f *ir.File, fileName string) (errs.Errors, []errs.Warning) {
+	var problems errs.Errors
+	var warns []errs.Warning
+
+	declared := make(map[string]*ir.NamedSet, len(f.Sets))
+	broken := make(map[string]bool, len(f.Sets))
+	for i := range f.Sets {
+		set := &f.Sets[i]
+		if _, reserved := reservedSetNames[strings.ToLower(set.Name)]; reserved {
+			problems = append(problems, errs.NewError(fileName, set.Line, 0, errs.CategorySemantic,
+				errs.CodeSemantic, "命名集合名 %q 是保留字", set.Name))
+			broken[set.Name] = true
+			continue
+		}
+		if prev, ok := declared[set.Name]; ok {
+			problems = append(problems, errs.NewError(fileName, set.Line, 0, errs.CategorySemantic,
+				errs.CodeSemantic, "命名集合 %q 与第 %d 行重复定义", set.Name, prev.Line))
+			broken[set.Name] = true
+			continue
+		}
+		set.V4, set.V6 = ir.MergePrefixes(set.Elements)
+		if !set.HasIPv4() && !set.HasIPv6() {
+			problems = append(problems, errs.NewError(fileName, set.Line, 0, errs.CategorySemantic,
+				errs.CodeSemantic, "命名集合 %q 没有可用地址", set.Name))
+			broken[set.Name] = true
+			continue
+		}
+		declared[set.Name] = set
+	}
+
+	used := make(map[string]bool, len(declared))
+	for i := range f.Rules {
+		r := &f.Rules[i]
+		if r.Src.Named == "" || r.Src.Named == ir.PrivateName {
+			continue
+		}
+		set, ok := declared[r.Src.Named]
+		if !ok {
+			if !broken[r.Src.Named] {
+				problems = append(problems, errs.NewError(fileName, r.Line, 0, errs.CategorySemantic,
+					errs.CodeSemantic, "未定义的命名集合 @%s", r.Src.Named))
+			}
+			continue
+		}
+		used[set.Name] = true
+		// 单族集合回填具体族：后续的源/目一致性与协议族检查复用现有逻辑；
+		// 混合集合保持 FamilyAny，由生成阶段按族展开两条规则。
+		r.Src.Family = set.Family()
+	}
+
+	for i := range f.Sets {
+		set := f.Sets[i]
+		if broken[set.Name] || used[set.Name] {
+			continue
+		}
+		warns = append(warns, errs.NewWarning(fileName, set.Line, 0, errs.CodeUnusedSet,
+			"命名集合 %q 未被任何规则引用", set.Name))
+	}
+	return problems, warns
+}
 
 // Check 返回编译错误与告警。错误非空时文件不可编译；告警不影响退出码。
 func Check(f *ir.File, fileName string) (errs.Errors, []errs.Warning) {
 	var problems errs.Errors
 	var warns []errs.Warning
+
+	setProblems, setWarns := resolveSets(f, fileName)
+	problems = append(problems, setProblems...)
+	warns = append(warns, setWarns...)
 
 	for _, r := range f.Rules {
 		if r.Proto.IsICMP() && !r.Ports.IsAny() {

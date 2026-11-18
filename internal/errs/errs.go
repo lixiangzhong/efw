@@ -37,6 +37,7 @@ const (
 	CodeUnreachableRule = "W1" // 相同匹配、不同动作，后者不可达
 	CodeV6BootstrapIdle = "W2" // 兜底 accept 时 v6-bootstrap 无作用
 	CodeFallbackAccept  = "W3" // 兜底为 accept：未命中流量一律放行
+	CodeUnusedSet       = "W4" // 命名集合未被任何规则引用
 )
 
 // Problem 是错误与告警共有的定位信息。

@@ -31,6 +31,9 @@ var ifaceNameRe = regexp.MustCompile(`^[A-Za-z0-9_.@-]{1,15}$`)
 // 例如 "br-*"、"docker*"；masquerade 的出接口仍用 ifaceNameRe 严格校验。
 var ifacePatternRe = regexp.MustCompile(`^[A-Za-z0-9_.@-]{1,14}\*?$`)
 
+// setNameRe 校验命名集合名与引用：字母/下划线开头，后接字母/数字/下划线，长度 1-32。
+var setNameRe = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]{0,31}$`)
+
 // directiveNames 是文件头指令名。
 var directiveNames = map[string]struct{}{
 	"established":  {},
@@ -38,20 +41,24 @@ var directiveNames = map[string]struct{}{
 	"forward":      {},
 }
 
-// blockKind 区分动作块与 masquerade（出站 NAT）块。
+// blockKind 区分动作块、masquerade（出站 NAT）块与命名集合块。
 type blockKind uint8
 
 const (
 	blockVerdict blockKind = iota
 	blockMasquerade
+	blockSet
 )
 
-// blockCtx 是当前块的上下文：动作块带 verdict，masquerade 块只收集 NAT 规则。
+// blockCtx 是当前块的上下文：动作块带 verdict，masquerade 块收集 NAT 规则，
+// 命名集合块收集地址元素（setIndex 指向 ir.File.Sets 中的条目）。
 type blockCtx struct {
-	kind    blockKind
-	verdict ir.Verdict
-	line    int
-	rules   int
+	kind     blockKind
+	verdict  ir.Verdict
+	line     int
+	rules    int
+	elements int
+	setIndex int
 }
 
 // Parse 解析 DSL 文本。返回错误非空时文件不可编译。
@@ -120,16 +127,37 @@ func (p *parser) parseLine(lineNo int, rawLine string) {
 		p.openBlock(lineNo, verdict)
 		return
 	}
+	// 命名集合定义块头是裸名字；误写成 `@ABC {` 时给明确提示（@ 只用于引用）。
+	if name, ok := atSetDefinition(text); ok {
+		p.syntaxErr(lineNo, "命名集合定义块头不写 @（写成 `%s {`）；@ 只用于规则里的引用", name)
+		return
+	}
+	// 命名集合块：块头是裸名字（`ABC {`），也可能写成单行（`ABC { 1.1.1.1 }`）。
+	if name, content, ok := p.inlineNamedSet(text); ok {
+		p.parseInlineNamedSet(lineNo, name, content)
+		return
+	}
+	if name, ok := p.namedSetHeader(text); ok {
+		p.openNamedSetBlock(lineNo, name)
+		return
+	}
+	if isSetKeywordLine(text) {
+		p.syntaxErr(lineNo, "命名集合块头直接写名字（如 `ABC {`），不需要 set 关键字")
+		return
+	}
 	if strings.HasSuffix(text, "{") {
-		p.syntaxErr(lineNo, "块头格式错误（应为 accept|drop|reject { 或 masquerade {）或花括号未闭合")
+		p.syntaxErr(lineNo, "块头格式错误（应为 accept|drop|reject {、masquerade { 或命名集合 `NAME {`）或花括号未闭合")
 		return
 	}
 	if p.block != nil {
-		if p.block.kind == blockMasquerade {
+		switch p.block.kind {
+		case blockMasquerade:
 			p.parseMasqueradeEntry(lineNo, rawLine, text)
-			return
+		case blockSet:
+			p.parseSetElements(lineNo, text)
+		default:
+			p.parseBlockRule(lineNo, rawLine, text)
 		}
-		p.parseBlockRule(lineNo, rawLine, text)
 		return
 	}
 	p.parseTopLine(lineNo, rawLine, text)
@@ -240,9 +268,89 @@ func (p *parser) openBlock(lineNo int, verdict ir.Verdict) {
 	p.block = &blockCtx{verdict: verdict, line: lineNo}
 }
 
+// namedSetHeader 识别命名集合块头 `NAME {`（裸名字，不带 set 关键字）。
+func (p *parser) namedSetHeader(text string) (string, bool) {
+	if !strings.HasSuffix(text, "{") {
+		return "", false
+	}
+	name := strings.TrimSpace(strings.TrimSuffix(text, "{"))
+	if !setNameRe.MatchString(name) {
+		return "", false
+	}
+	return name, true
+}
+
+// inlineNamedSet 识别单行命名集合块 `NAME { 1.1.1.1 2.2.2.2 }`。
+func (p *parser) inlineNamedSet(text string) (string, string, bool) {
+	if !strings.HasSuffix(text, "}") {
+		return "", "", false
+	}
+	idx := strings.IndexByte(text, '{')
+	if idx < 0 {
+		return "", "", false
+	}
+	name := strings.TrimSpace(text[:idx])
+	if !setNameRe.MatchString(name) {
+		return "", "", false
+	}
+	return name, strings.TrimSpace(text[idx+1 : len(text)-1]), true
+}
+
+// openNamedSetBlock 打开分行命名集合块。
+func (p *parser) openNamedSetBlock(lineNo int, name string) {
+	if p.block != nil {
+		p.syntaxErr(lineNo, "命名集合块必须定义在动作块之外（不能嵌套）")
+		return
+	}
+	if strings.EqualFold(name, "set") {
+		p.syntaxErr(lineNo, "命名集合块头直接写名字（如 `ABC {`），不需要 set 关键字")
+		return
+	}
+	p.file.Sets = append(p.file.Sets, ir.NamedSet{Line: lineNo, Name: name})
+	p.block = &blockCtx{kind: blockSet, line: lineNo, setIndex: len(p.file.Sets) - 1}
+}
+
+// parseInlineNamedSet 解析单行命名集合块。
+func (p *parser) parseInlineNamedSet(lineNo int, name, content string) {
+	if content == "" {
+		p.syntaxErr(lineNo, "命名集合 %s 至少需要一个地址", name)
+		return
+	}
+	p.openNamedSetBlock(lineNo, name)
+	if p.block == nil {
+		return
+	}
+	p.parseSetElements(lineNo, content)
+	p.closeBlock(lineNo)
+}
+
+// parseSetElements 解析命名集合块内的地址元素；一行可写多个，逗号与空白都作分隔。
+func (p *parser) parseSetElements(lineNo int, text string) {
+	set := &p.file.Sets[p.block.setIndex]
+	fields := strings.FieldsFunc(text, func(r rune) bool {
+		return r == ',' || unicode.IsSpace(r)
+	})
+	for _, raw := range fields {
+		addr, msg := parseAddr(raw)
+		if msg != "" || addr.Any {
+			p.semanticErr(lineNo, "集合元素必须是 IPv4/IPv6 地址或 CIDR，得到 %q", raw)
+			continue
+		}
+		set.Elements = append(set.Elements, addr.Value)
+		p.block.elements++
+	}
+}
+
 func (p *parser) closeBlock(lineNo int) {
 	if p.block == nil {
 		p.syntaxErr(lineNo, "多余的 }（没有打开的块）")
+		return
+	}
+	if p.block.kind == blockSet {
+		if p.block.elements == 0 {
+			p.syntaxErr(p.block.line, "命名集合 %s 至少需要一个地址", p.file.Sets[p.block.setIndex].Name)
+		}
+		p.block = nil
 		return
 	}
 	if p.block.rules == 0 {
@@ -502,6 +610,10 @@ func (p *parser) parseBlockRule(lineNo int, rawLine, text string) {
 		p.parseIfaceRule(lineNo, rawLine, text, verdict)
 		return
 	}
+	if name, ok := p.namedSetHeader(text); ok {
+		p.syntaxErr(lineNo, "命名集合 %q 必须定义在动作块之外", name)
+		return
+	}
 
 	arrow := strings.Index(text, "->")
 	if arrow < 0 {
@@ -675,6 +787,10 @@ func (p *parser) parseMasquerade(lineNo int, rawLine, text string) (ir.Masquerad
 func (p *parser) parseMasqueradeSrc(lineNo int, raw string) (ir.Addr, bool) {
 	if strings.EqualFold(raw, ir.PrivateName) {
 		return ir.Addr{Named: ir.PrivateName}, true
+	}
+	if _, ok := parseSetRef(raw); ok {
+		p.semanticErr(lineNo, "masquerade 源地址不支持命名集合（用 private 或具体网段）")
+		return ir.Addr{}, false
 	}
 	addr, msg := parseAddr(raw)
 	if msg != "" {
@@ -887,6 +1003,13 @@ func (p *parser) parseSrcToken(lineNo int, raw string) (ir.Addr, bool) {
 		p.syntaxErr(lineNo, "`://` 语法已移除：协议请写成独立 token（如 `tcp 1.1.1.1 -> 80`）")
 		return ir.Addr{}, false
 	}
+	if name, ok := parseSetRef(raw); ok {
+		return ir.Addr{Named: name, Family: ir.FamilyAny}, true
+	}
+	if setNameRe.MatchString(raw) {
+		p.semanticErr(lineNo, "地址 %q 不合法（命名集合引用要加 @ 前缀，如 @%s）", raw, raw)
+		return ir.Addr{}, false
+	}
 	src, msg := parseAddr(raw)
 	if msg != "" {
 		if strings.Contains(raw, ":") {
@@ -959,6 +1082,10 @@ func (p *parser) classifyToken(lineNo int, raw string) (tokenKind, ir.Addr, ir.P
 		p.semanticErr(lineNo, "private 只能单独成行（表示私有源地址），不能作为目的地址")
 		return tokenAddr, ir.Addr{}, ir.PortSet{}, false
 	}
+	if name, ok := parseSetRef(raw); ok {
+		p.semanticErr(lineNo, "命名集合 @%s 只能作为源地址（如 `@%s -> 80`）", name, name)
+		return tokenAddr, ir.Addr{}, ir.PortSet{}, false
+	}
 	if strings.HasPrefix(raw, "[") {
 		end := strings.IndexByte(raw, ']')
 		if end < 0 {
@@ -1016,6 +1143,10 @@ func (p *parser) classifyToken(lineNo int, raw string) (tokenKind, ir.Addr, ir.P
 		}
 		if strings.Contains(host, ".") {
 			p.semanticErr(lineNo, "地址 %q 不是合法的 IPv4/CIDR", host)
+			return tokenAddr, ir.Addr{}, ir.PortSet{}, false
+		}
+		if name, ok := parseSetRef(host); ok {
+			p.semanticErr(lineNo, "命名集合 @%s 只能作为源地址，不能写成 %q", name, raw)
 			return tokenAddr, ir.Addr{}, ir.PortSet{}, false
 		}
 	}
@@ -1179,6 +1310,49 @@ func looksLikePortSet(raw string) bool {
 		}
 	}
 	return true
+}
+
+// isSetKeywordLine 识别误写成 `set NAME { ... }` 的命名集合块，给出明确迁移提示。
+func isSetKeywordLine(text string) bool {
+	idx := strings.IndexByte(text, '{')
+	if idx < 0 {
+		return false
+	}
+	fields := strings.Fields(text[:idx])
+	return len(fields) == 2 && strings.EqualFold(fields[0], "set")
+}
+
+// atSetDefinition 识别误用 @ 前缀的定义块头（`@ABC {` / `@ABC { 1.1.1.1 }`），
+// 返回去掉 @ 的名字；@ 只用于规则里的引用。
+func atSetDefinition(text string) (string, bool) {
+	var head string
+	switch {
+	case strings.HasSuffix(text, "{"):
+		head = strings.TrimSuffix(text, "{")
+	case strings.HasSuffix(text, "}"):
+		idx := strings.IndexByte(text, '{')
+		if idx < 0 {
+			return "", false
+		}
+		head = text[:idx]
+	default:
+		return "", false
+	}
+	name := strings.TrimSpace(head)
+	if _, ok := parseSetRef(name); !ok {
+		return "", false
+	}
+	return strings.TrimPrefix(name, "@"), true
+}
+
+// parseSetRef 解析命名集合引用：必须以 @ 开头（`@WHITELIST`），返回去掉前缀的名字。
+// private 是独立规则关键字，不走这里。
+func parseSetRef(raw string) (string, bool) {
+	name, ok := strings.CutPrefix(raw, "@")
+	if !ok || !setNameRe.MatchString(name) {
+		return "", false
+	}
+	return name, true
 }
 
 // parseAddr 解析 * / IPv4 / IPv6 / CIDR，返回规范化文本。

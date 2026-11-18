@@ -143,8 +143,9 @@ func (a Addr) Key() string {
 	return a.Value
 }
 
-// HasFamily 表示地址是否限定了具体地址族；命名集合（private）同时覆盖 v4/v6，不算限定。
-func (a Addr) HasFamily() bool { return !a.Any && a.Named == "" }
+// HasFamily 表示地址是否限定了具体地址族。private 与混合族命名集合同时覆盖
+// v4/v6（FamilyAny）不算限定；单族命名集合在解析后由 validate 回填具体族。
+func (a Addr) HasFamily() bool { return !a.Any && a.Family != FamilyAny }
 
 // PortRange 是闭区间端口。
 type PortRange struct{ Lo, Hi uint16 }
@@ -210,6 +211,34 @@ type Masquerade struct {
 	Iface string // 出接口名（必填）
 }
 
+// NamedSet 是用户定义的命名集合。DSL 层一个块可混写 IPv4/IPv6；因为 nft set
+// 是单地址族的，产物按族拆成 <Name>_v4 / <Name>_v6（哪个族有元素才生成哪个）。
+type NamedSet struct {
+	Line     int
+	Name     string
+	Elements []string // 规范化后的 IP/CIDR（可混族，按书写顺序）
+	V4       []string // 归并后的 IPv4 产物元素（升序、无重叠）
+	V6       []string // 归并后的 IPv6 产物元素（升序、无重叠）
+}
+
+// HasIPv4 报告集合归并后是否含 IPv4 元素。
+func (s NamedSet) HasIPv4() bool { return len(s.V4) > 0 }
+
+// HasIPv6 报告集合归并后是否含 IPv6 元素。
+func (s NamedSet) HasIPv6() bool { return len(s.V6) > 0 }
+
+// Family 返回集合覆盖的地址族：单族返回对应族，两族都有返回 FamilyAny。
+func (s NamedSet) Family() Family {
+	switch {
+	case s.HasIPv4() && s.HasIPv6():
+		return FamilyAny
+	case s.HasIPv6():
+		return FamilyIPv6
+	default:
+		return FamilyIPv4
+	}
+}
+
 // File 是解析后的完整 DSL 文件。
 type File struct {
 	Established bool // true = auto
@@ -217,6 +246,7 @@ type File struct {
 	Forward     bool // true = auto（同时生成 forward 链，仅匹配 DNAT 流量）
 	Rules       []Rule
 	Masquerades []Masquerade
+	Sets        []NamedSet
 }
 
 // MatchesAll 报告规则是否匹配一切（用于识别兜底规则）。

@@ -30,6 +30,9 @@ type Address struct {
 	SetName string
 }
 
+// HasFamily 报告地址是否限定了具体地址族；Any 与命名集合（可能跨族）不算。
+func (a Address) HasFamily() bool { return !a.Any && a.Named == "" }
+
 // Ports 是生成阶段的端口选择器：不限、内联区间或命名 set。
 type Ports struct {
 	SetName string

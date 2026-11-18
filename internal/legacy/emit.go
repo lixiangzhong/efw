@@ -26,6 +26,11 @@ const (
 	// 同优先级跨表顺序不保证，不能依赖。
 	masqueradeChainName = "postrouting"
 	masqueradePriority  = "90"
+
+	// namedSetV4Suffix/namedSetV6Suffix 是用户命名集合在产物里的拆分后缀：
+	// nft set 单地址族，DSL 一个块按族拆成 <Name>_v4 / <Name>_v6。
+	namedSetV4Suffix = "_v4"
+	namedSetV6Suffix = "_v6"
 )
 
 // v6BootstrapTypes 是 v6-bootstrap 放行的 ICMPv6 类型：错误报文（不可达/报文过大/超时/
@@ -90,8 +95,9 @@ func Render(f *ir.File, plan optimize.Plan, opts Options) []byte {
 			optimize.Set{Name: ir.Private4SetName, Kind: optimize.KindIPv4, Elements: ir.Private4Prefixes},
 			optimize.Set{Name: ir.Private6SetName, Kind: optimize.KindIPv6, Elements: ir.Private6Prefixes},
 		)
-		sort.Slice(sets, func(i, j int) bool { return sets[i].Name < sets[j].Name })
 	}
+	sets = append(sets, namedSetDefs(f, plan)...)
+	sort.Slice(sets, func(i, j int) bool { return sets[i].Name < sets[j].Name })
 	for _, set := range sets {
 		renderSet(&b, set)
 	}
@@ -206,8 +212,11 @@ func renderRule(b *strings.Builder, r optimize.Rule, logPrefix string, unreachab
 //   - 端口为多个内联值/范围：拆成每条一个值/范围（内联集合 + proto-dst 无效，命名 set 有效）。
 func ruleTexts(r optimize.Rule, logPrefix string, forward bool) []string {
 	families := []ir.Family{ir.FamilyAny}
-	if hasPrivate(r) {
+	switch {
+	case hasPrivate(r):
 		families = []ir.Family{ir.FamilyIPv4, ir.FamilyIPv6}
+	case isNamedSource(r):
+		families = namedFamilies(r)
 	}
 	texts := make([]string, 0, len(families))
 	for _, family := range families {
@@ -219,6 +228,66 @@ func ruleTexts(r optimize.Rule, logPrefix string, forward bool) []string {
 // hasPrivate 报告规则是否用 private 作为源地址。
 func hasPrivate(r optimize.Rule) bool {
 	return r.Src.Named == ir.PrivateName
+}
+
+// isNamedSource 报告源地址是否是用户命名集合（private 由 hasPrivate 单独处理）。
+func isNamedSource(r optimize.Rule) bool {
+	return r.Src.Named != "" && r.Src.Named != ir.PrivateName
+}
+
+// namedFamilies 返回命名集合要展开的地址族：集合含哪些族就展开哪些，
+// 再按规则里钉死的族（单栈协议 / 目的地址）过滤，避免生成永不命中的规则。
+func namedFamilies(r optimize.Rule) []ir.Family {
+	candidates := make([]ir.Family, 0, 2)
+	if r.Src.Family != ir.FamilyIPv6 {
+		candidates = append(candidates, ir.FamilyIPv4)
+	}
+	if r.Src.Family != ir.FamilyIPv4 {
+		candidates = append(candidates, ir.FamilyIPv6)
+	}
+	kept := make([]ir.Family, 0, len(candidates))
+	for _, family := range candidates {
+		if r.Dst.HasFamily() && r.Dst.Family != family {
+			continue
+		}
+		if pf := r.Proto.Family(); pf != ir.FamilyAny && pf != family {
+			continue
+		}
+		kept = append(kept, family)
+	}
+	return kept
+}
+
+// namedSetDefs 生成被引用的命名集合定义：只输出集合里实际存在的地址族，
+// 未被引用的集合不产出（编译期会有 W4 告警）。
+func namedSetDefs(f *ir.File, plan optimize.Plan) []optimize.Set {
+	used := make(map[string]bool, len(f.Sets))
+	for _, r := range plan.Rules {
+		if isNamedSource(r) {
+			used[r.Src.Named] = true
+		}
+	}
+	var out []optimize.Set
+	for _, set := range f.Sets {
+		if !used[set.Name] {
+			continue
+		}
+		if set.HasIPv4() {
+			out = append(out, optimize.Set{
+				Name:     set.Name + namedSetV4Suffix,
+				Kind:     optimize.KindIPv4,
+				Elements: set.V4,
+			})
+		}
+		if set.HasIPv6() {
+			out = append(out, optimize.Set{
+				Name:     set.Name + namedSetV6Suffix,
+				Kind:     optimize.KindIPv6,
+				Elements: set.V6,
+			})
+		}
+	}
+	return out
 }
 
 // usesPrivate 报告产物是否需要 private4/private6 集合。
@@ -328,11 +397,19 @@ func originalDstExpr(a optimize.Address, family ir.Family) string {
 
 // addressExpr 生成地址匹配表达式；family 用于 private 源地址的地址族展开。
 func addressExpr(direction string, a optimize.Address, family ir.Family) string {
-	if a.Named == ir.PrivateName {
-		if family == ir.FamilyIPv6 {
-			return fmt.Sprintf("ip6 %s @%s", direction, ir.Private6SetName)
+	if a.Named != "" {
+		if a.Named == ir.PrivateName {
+			if family == ir.FamilyIPv6 {
+				return fmt.Sprintf("ip6 %s @%s", direction, ir.Private6SetName)
+			}
+			return fmt.Sprintf("ip %s @%s", direction, ir.Private4SetName)
 		}
-		return fmt.Sprintf("ip %s @%s", direction, ir.Private4SetName)
+		// 用户命名集合：按展开族选 ip/ip6 与对应的拆分集合名。
+		fam, suffix := "ip", namedSetV4Suffix
+		if family == ir.FamilyIPv6 {
+			fam, suffix = "ip6", namedSetV6Suffix
+		}
+		return fmt.Sprintf("%s %s @%s%s", fam, direction, a.Named, suffix)
 	}
 	fam := "ip"
 	if a.Family == ir.FamilyIPv6 {
