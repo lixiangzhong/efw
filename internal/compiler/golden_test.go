@@ -25,7 +25,8 @@ func testOptions(source string) compiler.Options {
 	}
 }
 
-// TestGolden 逐字节比对 DSL 编译产物与冻结的期望输出，并验证确定性。
+// TestGolden 逐字节比对 DSL 编译产物与冻结的期望输出，并验证确定性；
+// REGEN_GOLDEN=1 时重写期望文件（与 legacy 黄金测试一致）。
 func TestGolden(t *testing.T) {
 	inputs, err := filepath.Glob(filepath.Join(goldenDir, "*.acl"))
 	if err != nil {
@@ -42,15 +43,23 @@ func TestGolden(t *testing.T) {
 			if err != nil {
 				t.Fatalf("读取输入失败: %v", err)
 			}
-			want, err := os.ReadFile(strings.TrimSuffix(aclPath, ".acl") + ".nft")
-			if err != nil {
-				t.Fatalf("读取期望产物失败: %v", err)
-			}
 
 			opts := testOptions("testdata/golden/" + name + ".acl")
 			got, _, err := compiler.Compile(src, opts)
 			if err != nil {
 				t.Fatalf("编译失败: %v", err)
+			}
+
+			wantPath := strings.TrimSuffix(aclPath, ".acl") + ".nft"
+			if os.Getenv("REGEN_GOLDEN") != "" {
+				if err := os.WriteFile(wantPath, got, 0o644); err != nil {
+					t.Fatal(err)
+				}
+				return
+			}
+			want, err := os.ReadFile(wantPath)
+			if err != nil {
+				t.Fatalf("读取期望产物失败: %v", err)
 			}
 			if !bytes.Equal(got, want) {
 				t.Fatalf("产物与黄金文件不一致\n--- got ---\n%s\n--- want ---\n%s", got, want)

@@ -28,12 +28,12 @@ const (
 	masqueradePriority  = "90"
 )
 
-// baseInternal4/baseInternal6 是默认放行的本机/非 RFC1918 来源。
-// RFC1918（10/8、172.16/12、192.168/16）默认不放行；容器运行时网段由 apply 探测后追加。
-var (
-	baseInternal4 = []string{"100.64.0.0/10", "127.0.0.0/8", "169.254.0.0/16"}
-	baseInternal6 = []string{"::1", "fc00::/7", "fe80::/10"}
-)
+// v6BootstrapTypes 是 v6-bootstrap 放行的 ICMPv6 类型：错误报文（不可达/报文过大/超时/
+// 参数问题，PMTUD 依赖 packet-too-big）、NDP（RS/RA/NS/NA）与 MLD 查询。
+// 这些是 IPv6 能用起来的基础设施流量：链路本地来源不再被隐式信任后，缺了它们会静默
+// 断掉邻居解析、组播成员关系与大包传输。
+const v6BootstrapTypes = "destination-unreachable, packet-too-big, time-exceeded, parameter-problem, " +
+	"nd-router-solicit, nd-router-advert, nd-neighbor-solicit, nd-neighbor-advert, mld-listener-query"
 
 // Options 是产物头的元信息与部署参数。
 type Options struct {
@@ -48,13 +48,6 @@ type Options struct {
 	Now       time.Time
 	// UnreachableLines 是 W1 告警涉及的行号，产物中会加 unreachable 注释。
 	UnreachableLines map[int]bool
-}
-
-// internalSourceSets 生成 input/forward 最前面的来源放行集合：
-// 默认含 CGNAT/loopback/link-local 与 IPv6 ULA/link-local/回环；
-// RFC1918 不默认放行，容器来源由 ACL 里的 `iface br-*` / `iface docker0` 显式信任。
-func internalSourceSets() (string, string) {
-	return "{ " + strings.Join(baseInternal4, ", ") + " }", "{ " + strings.Join(baseInternal6, ", ") + " }"
 }
 
 // Render 渲染完整可加载的 ruleset。同一输入与选项必须产出字节级相同结果。
@@ -108,20 +101,16 @@ func renderChain(b *strings.Builder, f *ir.File, plan optimize.Plan, opts Option
 		fmt.Fprintf(b, "%s# 说明: 本链只匹配 DNAT 转发流量（如容器发布端口）\n\n", indentChain)
 	}
 	if !forward {
-		fmt.Fprintf(b, "%s# auto: 本机回环放行（本机访问自身地址也走 lo）\n", indentChain)
+		fmt.Fprintf(b, "%s# auto: 本机回环放行（唯一的隐式信任：本机访问自身地址也走 lo；其余来源一律走 ACL）\n", indentChain)
 		fmt.Fprintf(b, "%siifname \"lo\" accept\n\n", indentChain)
 	}
-	internal4, internal6 := internalSourceSets()
-	fmt.Fprintf(b, "%s# auto: 本机/CGNAT/link-local 来源放行（RFC1918 默认不放；容器来源由 iface 规则显式信任）\n", indentChain)
-	fmt.Fprintf(b, "%sip saddr %s accept\n", indentChain, internal4)
-	fmt.Fprintf(b, "%sip6 saddr %s accept\n\n", indentChain, internal6)
 	if f.Established {
 		fmt.Fprintf(b, "%s# auto: 已建立连接放行\n", indentChain)
 		fmt.Fprintf(b, "%sct state established,related accept\n\n", indentChain)
 	}
 	if !forward && f.V6Bootstrap && f.FallbackDeny() {
-		fmt.Fprintf(b, "%s# auto: IPv6 邻居发现（NDP）\n", indentChain)
-		fmt.Fprintf(b, "%sip6 nexthdr ipv6-icmp icmpv6 type { nd-neighbor-solicit, nd-neighbor-advert, nd-router-solicit, nd-router-advert } accept\n\n", indentChain)
+		fmt.Fprintf(b, "%s# auto: IPv6 基础设施（NDP / MLD / ICMPv6 错误，含 PMTUD）\n", indentChain)
+		fmt.Fprintf(b, "%sip6 nexthdr ipv6-icmp icmpv6 type { %s } accept\n\n", indentChain, v6BootstrapTypes)
 		fmt.Fprintf(b, "%s# auto: DHCPv6\n", indentChain)
 		fmt.Fprintf(b, "%sudp dport { 546, 547 } accept\n\n", indentChain)
 	}

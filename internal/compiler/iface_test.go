@@ -169,8 +169,8 @@ func TestLoopbackAllowedByDefault(t *testing.T) {
 	}
 
 	loIdx := strings.Index(out, `iifname "lo" accept`)
-	srcIdx := strings.Index(out, "# auto: 本机/CGNAT/link-local")
-	if loIdx < 0 || srcIdx < 0 || loIdx > srcIdx {
-		t.Fatalf("lo 放行应在来源放行之前:\n%s", out)
+	establishedIdx := strings.Index(out, "# auto: 已建立连接放行")
+	if loIdx < 0 || establishedIdx < 0 || loIdx > establishedIdx {
+		t.Fatalf("lo 放行应在 established 之前:\n%s", out)
 	}
 }

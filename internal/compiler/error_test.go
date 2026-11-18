@@ -298,7 +298,7 @@ func TestBarePortRule(t *testing.T) {
 			if !strings.Contains(string(out), tc.want) {
 				t.Fatalf("产物缺少 %q:\n%s", tc.want, out)
 			}
-			// 隐式 * 源：该规则行不应生成源地址匹配（内网来源放行是独立自动规则）。
+			// 隐式 * 源：该规则行不应生成源地址匹配。
 			if !strings.Contains(tc.name, "等价 *") {
 				for _, line := range strings.Split(string(out), "\n") {
 					if strings.Contains(line, tc.want) && strings.Contains(line, "ip saddr") {
