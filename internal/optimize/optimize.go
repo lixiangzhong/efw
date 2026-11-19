@@ -278,17 +278,16 @@ func buildMerged(group []ir.Rule, dim dimension, sets map[string]Set) Rule {
 	return out
 }
 
+// addrElements 提取归集维度的地址元素。归集出的 set 是 nft interval 集合，
+// 重叠或包含的元素会被 nft 拒绝（conflicting intervals specified），因此这里
+// 复用命名集合的归并逻辑折叠成最小 CIDR；保留字典序排序以稳定产物。
 func addrElements(group []ir.Rule, pick func(ir.Rule) ir.Addr) []string {
-	seen := make(map[string]struct{}, len(group))
 	elements := make([]string, 0, len(group))
 	for _, r := range group {
-		value := pick(r).Value
-		if _, ok := seen[value]; ok {
-			continue
-		}
-		seen[value] = struct{}{}
-		elements = append(elements, value)
+		elements = append(elements, pick(r).Value)
 	}
+	v4, v6 := ir.MergePrefixes(elements)
+	elements = append(v4, v6...)
 	sort.Strings(elements)
 	return elements
 }

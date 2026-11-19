@@ -114,6 +114,22 @@ func TestMergeSrcStable(t *testing.T) {
 	}
 }
 
+// TestMergeSrcOverlap 归集出的 set 必须归并重叠/包含元素：nft interval set
+// 拒绝重叠区间（conflicting intervals specified），编译期必须先折叠。
+func TestMergeSrcOverlap(t *testing.T) {
+	f := &ir.File{Rules: []ir.Rule{
+		rule(1, "1.1.1.0/24", "*", ir.ProtoTCP, ports(port(80)), ir.VerdictAccept),
+		rule(2, "1.1.1.1", "*", ir.ProtoTCP, ports(port(80)), ir.VerdictAccept),
+	}}
+	plan := optimize.Run(f)
+	if len(plan.Sets) != 1 {
+		t.Fatalf("期望 1 个 set，实际 %d", len(plan.Sets))
+	}
+	if got := plan.Sets[0].Elements; len(got) != 1 || got[0] != "1.1.1.0/24" {
+		t.Fatalf("重叠元素未归并: %v", got)
+	}
+}
+
 // TestDedupeConsecutive 相邻完全重复的规则去重。
 func TestDedupeConsecutive(t *testing.T) {
 	f := &ir.File{Rules: []ir.Rule{

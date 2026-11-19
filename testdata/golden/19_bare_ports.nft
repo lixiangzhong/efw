@@ -4,10 +4,10 @@
 # policy: accept | fallback: drop | established: auto | v6-bootstrap: off | forward: auto
 
 table inet efw {
-    set s_ipv4_7af0e030 {
+    set s_ipv4_97ba53bf {
         type ipv4_addr
         flags interval
-        elements = { 1.1.1.6, 1.1.1.7 }
+        elements = { 1.1.1.6/31 }
     }
 
     set s_svc_f3ba889c {
@@ -42,7 +42,7 @@ table inet efw {
 
         # 8: accept { 1.1.1.6 -> 7000,7001 }
         # 9: accept { 1.1.1.7 -> 7000,7001 }
-        ip saddr @s_ipv4_7af0e030 meta l4proto { tcp, udp } th dport { 7000-7001 } accept
+        ip saddr @s_ipv4_97ba53bf meta l4proto { tcp, udp } th dport { 7000-7001 } accept
 
         # 10: accept { 2.2.2.2 -> 9000,9001 }
         # 11: accept { 2.2.2.2 -> 9002 }
@@ -89,8 +89,8 @@ table inet efw {
 
         # 8: accept { 1.1.1.6 -> 7000,7001 }
         # 9: accept { 1.1.1.7 -> 7000,7001 }
-        ct status dnat ip saddr @s_ipv4_7af0e030 meta l4proto tcp ct original proto-dst { 7000-7001 } accept
-        ct status dnat ip saddr @s_ipv4_7af0e030 meta l4proto udp ct original proto-dst { 7000-7001 } accept
+        ct status dnat ip saddr @s_ipv4_97ba53bf meta l4proto tcp ct original proto-dst { 7000-7001 } accept
+        ct status dnat ip saddr @s_ipv4_97ba53bf meta l4proto udp ct original proto-dst { 7000-7001 } accept
 
         # 10: accept { 2.2.2.2 -> 9000,9001 }
         # 11: accept { 2.2.2.2 -> 9002 }

@@ -4,10 +4,10 @@
 # policy: accept | fallback: drop | established: auto | v6-bootstrap: off | forward: auto
 
 table inet efw {
-    set s_ipv6_cc0fc990 {
+    set s_ipv6_d0695907 {
         type ipv6_addr
         flags interval
-        elements = { 2001:db8::1, 2001:db8::2, 2001:db8::3 }
+        elements = { 2001:db8::1, 2001:db8::2/127 }
     }
 
     chain input {
@@ -22,7 +22,7 @@ table inet efw {
         # 3: accept { 2001:db8::1 -> tcp *:80 }
         # 4: accept { 2001:db8::2 -> tcp *:80 }
         # 5: accept { 2001:db8::3 -> tcp *:80 }
-        ip6 saddr @s_ipv6_cc0fc990 tcp dport 80 accept
+        ip6 saddr @s_ipv6_d0695907 tcp dport 80 accept
 
         # 7: drop { * }
         drop
@@ -39,7 +39,7 @@ table inet efw {
         # 3: accept { 2001:db8::1 -> tcp *:80 }
         # 4: accept { 2001:db8::2 -> tcp *:80 }
         # 5: accept { 2001:db8::3 -> tcp *:80 }
-        ct status dnat ip6 saddr @s_ipv6_cc0fc990 meta l4proto tcp ct original proto-dst 80 accept
+        ct status dnat ip6 saddr @s_ipv6_d0695907 meta l4proto tcp ct original proto-dst 80 accept
 
         # 7: drop { * }
         ct status dnat drop
