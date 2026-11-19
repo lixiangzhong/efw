@@ -113,8 +113,8 @@ func newCommand(app App, stdin io.Reader, stdout, stderr io.Writer) *cli.Command
 	return &cli.Command{
 		Name:        app.Name,
 		Usage:       app.Usage,
-		UsageText:   fmt.Sprintf("%s <file> [flags]\n   %s compile [flags] [file]\n   %s apply [flags] [file]", app.Name, app.Name, app.Name),
-		Description: "DSL → nftables ruleset 文本（compile）或编译后原子应用到内核（apply，需 root/CAP_NET_ADMIN）。不给文件时从 stdin 读取。",
+		UsageText:   fmt.Sprintf("%s <file> [flags]\n   %s compile [flags] [file]\n   %s apply [flags] [file]\n   %s format [--write|--check] [file]", app.Name, app.Name, app.Name, app.Name),
+		Description: "DSL → nftables ruleset 文本（compile）、编译后原子应用到内核（apply，需 root/CAP_NET_ADMIN），或格式化源文件（format）。不给文件时从 stdin 读取。",
 		Version:     app.Version,
 		Reader:      stdin,
 		Writer:      stdout,
@@ -129,6 +129,7 @@ func newCommand(app App, stdin io.Reader, stdout, stderr io.Writer) *cli.Command
 		Commands: []*cli.Command{
 			compileCommand(app, stdin, stdout, stderr),
 			applyCommand(app, stdin, stderr),
+			formatCommand(app, stdin, stdout),
 			versionCommand(app, stdout),
 		},
 		Action: func(ctx context.Context, cmd *cli.Command) error {
@@ -149,7 +150,7 @@ func rootAction(app App, cmd *cli.Command, stdin io.Reader, stdout, stderr io.Wr
 	cmd.Writer = cmd.ErrWriter
 	_ = cli.DefaultShowRootCommandHelp(cmd)
 	cmd.Writer = writer
-	return usageErrorf("缺少子命令（仅支持 compile/apply）")
+	return usageErrorf("缺少子命令（仅支持 compile/apply/format）")
 }
 
 func compileFlags() []cli.Flag {
@@ -244,14 +245,14 @@ func readSource(opts compileOptions, positional []string, stdin io.Reader) (stri
 	if opts.file != "" && len(positional) == 1 {
 		return "", nil, usageErrorf("-f/--file 与位置参数只能二选一")
 	}
-	source := "<stdin>"
+	source := stdinSource
 	switch {
 	case opts.file != "":
 		source = opts.file
 	case len(positional) == 1:
 		source = positional[0]
 	}
-	if source == "<stdin>" {
+	if source == stdinSource {
 		data, err := io.ReadAll(stdin)
 		if err != nil {
 			return "", nil, usageErrorf("无法读取 stdin：%v", err)
