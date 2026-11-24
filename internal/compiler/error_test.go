@@ -43,7 +43,7 @@ func TestCompileErrors(t *testing.T) {
 		{"端口越界", "1.1.1.1 -> tcp *:70000 accept\n", errs.CategorySemantic, errs.CodeSemantic, "越界"},
 		{"端口范围倒置", "1.1.1.1 -> tcp *:90-80 accept\n", errs.CategorySemantic, errs.CodeSemantic, "起点大于终点"},
 		{"缺少箭头（两个目的地址）", "1.1.1.1 tcp *:80 accept\n", errs.CategorySemantic, errs.CodeSemantic, "目的地址只能出现一次"},
-		{"块外未知动作", "1.1.1.1 -> tcp *:80 allow\n", errs.CategorySyntax, errs.CodeSyntax, "规则必须写在动作块内"},
+		{"块外未知动作", "1.1.1.1 -> tcp *:80 bogus\n", errs.CategorySyntax, errs.CodeSyntax, "规则必须写在动作块内"},
 		{"未知协议 token", "1.1.1.1 -> sctp 80 accept\n", errs.CategorySemantic, errs.CodeSemantic, "未知协议"},
 		{"花括号不匹配", "accept {\n1.1.1.1 -> tcp *:{80,443\n}\ndrop { * }\n", errs.CategorySyntax, errs.CodeSyntax, "花括号不匹配"},
 		{"动作行后面还有规则", "1.1.1.1 -> tcp *:80 accept\ndrop\n2.2.2.2 -> tcp *:80 accept\n", errs.CategorySemantic, errs.CodeSemantic, "匹配一切的规则必须是展开后的最后一条"},

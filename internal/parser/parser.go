@@ -1,6 +1,6 @@
 // Package parser 把 DSL 文本解析为 ir.File。
 //
-// 解析器负责：文件头指令、动作块（accept/drop/reject { ... }）、匹配规则、
+// 解析器负责：文件头指令、动作块（accept/allow/drop/reject { ... }）、匹配规则、
 // 单独动作行（等价 action { * }）、地址/端口取值规范化，以及所有可在单行/单块内判定的语法与取值错误。
 // 跨规则、跨指令的语义检查由 validate 包负责。
 package parser
@@ -20,6 +20,9 @@ import (
 
 // utf8BOM 是可能出现在文件头部的字节序标记。
 const utf8BOM = "\xef\xbb\xbf"
+
+// verdictWordList 是提示文案里列出的合法动作词；allow 是 accept 的别名。
+const verdictWordList = "accept|allow|drop|reject"
 
 // portItemRe 匹配单个端口项（80 或 80-90）。
 var portItemRe = regexp.MustCompile(`^[0-9]+(-[0-9]+)?$`)
@@ -146,7 +149,7 @@ func (p *parser) parseLine(lineNo int, rawLine string) {
 		return
 	}
 	if strings.HasSuffix(text, "{") {
-		p.syntaxErr(lineNo, "块头格式错误（应为 accept|drop|reject {、masquerade { 或命名集合 `NAME {`）或花括号未闭合")
+		p.syntaxErr(lineNo, "块头格式错误（应为 "+verdictWordList+" {、masquerade { 或命名集合 `NAME {`）或花括号未闭合")
 		return
 	}
 	if p.block != nil {
@@ -246,7 +249,7 @@ func (p *parser) openMasqueradeBlock(lineNo int) {
 	p.block = &blockCtx{kind: blockMasquerade, line: lineNo}
 }
 
-// blockHeaderVerdict 判断一行是否是块头（accept|drop|reject {），返回块动作。
+// blockHeaderVerdict 判断一行是否是块头（accept/allow/drop/reject {），返回块动作。
 func blockHeaderVerdict(text string) (ir.Verdict, bool) {
 	if !strings.HasSuffix(text, "{") {
 		return 0, false
@@ -383,7 +386,7 @@ func (p *parser) parseTopLine(lineNo int, rawLine, text string) {
 		}
 		if isVerdictWord(fields[1]) {
 			if len(fields) != 2 {
-				p.syntaxErr(lineNo, "兜底简写只接受 [log] accept|drop|reject")
+				p.syntaxErr(lineNo, "兜底简写只接受 [log] "+verdictWordList)
 				return
 			}
 			p.parseStandaloneAction(lineNo, rawLine, fields)
@@ -395,11 +398,11 @@ func (p *parser) parseTopLine(lineNo int, rawLine, text string) {
 	case first == "masquerade":
 		p.syntaxErr(lineNo, "masquerade 是独立块，块头写成 `masquerade {`（单行可写 `masquerade { eth1 }`）")
 	default:
-		p.syntaxErr(lineNo, "规则必须写在动作块内（如 accept { ... } / drop { ... } / reject { ... }）")
+		p.syntaxErr(lineNo, "规则必须写在动作块内（如 accept { ... } / drop { ... } / reject { ... }；allow 是 accept 的别名）")
 	}
 }
 
-// parseStandaloneAction 解析块外兜底简写：[log] accept|drop|reject，
+// parseStandaloneAction 解析块外兜底简写：[log] accept|allow|drop|reject，
 // 等价于 verdict { * }（匹配一切，只能是展开后的最后一条）。
 func (p *parser) parseStandaloneAction(lineNo int, rawLine string, fields []string) {
 	p.rulesStarted = true
@@ -410,12 +413,12 @@ func (p *parser) parseStandaloneAction(lineNo int, rawLine string, fields []stri
 		idx = 1
 	}
 	if len(fields) != idx+1 {
-		p.syntaxErr(lineNo, "兜底简写只接受 [log] accept|drop|reject")
+		p.syntaxErr(lineNo, "兜底简写只接受 [log] "+verdictWordList)
 		return
 	}
 	verdict, ok := parseVerdict(fields[idx])
 	if !ok {
-		p.syntaxErr(lineNo, "%q 不是合法动作（accept|drop|reject）", fields[idx])
+		p.syntaxErr(lineNo, "%q 不是合法动作（"+verdictWordList+"）", fields[idx])
 		return
 	}
 	p.appendRule(lineNo, rawLine, "", ir.Addr{Any: true}, ir.Addr{Any: true}, ir.ProtoAny, ir.PortSet{}, log, false, verdict)
@@ -822,7 +825,7 @@ func (p *parser) checkMasqueradeIface(lineNo int, name string) bool {
 // 裸 token 与 -> 右侧都按出接口解析，关键字必须显式拒绝，避免静默生成无效规则。
 func isMasqueradeReservedWord(raw string) bool {
 	switch strings.ToLower(raw) {
-	case "accept", "drop", "reject", "log", "iface", "private", "masquerade",
+	case "accept", "allow", "drop", "reject", "log", "iface", "private", "masquerade",
 		"established", "v6-bootstrap", "forward",
 		"tcp", "udp", "icmp", "tcp4", "tcp6", "udp4", "udp6", "icmp4", "icmp6":
 		return true
@@ -1440,9 +1443,10 @@ func parsePortNumber(raw string) (uint16, string) {
 	return uint16(n), ""
 }
 
+// parseVerdict 把动作词映射为裁决；allow 是 accept 的别名（大小写不敏感）。
 func parseVerdict(raw string) (ir.Verdict, bool) {
 	switch strings.ToLower(raw) {
-	case "accept":
+	case "accept", "allow":
 		return ir.VerdictAccept, true
 	case "drop":
 		return ir.VerdictDrop, true
@@ -1474,6 +1478,8 @@ func isVerdictWord(word string) bool {
 	return ok
 }
 
+// looksLikeUnknownDirective 识别「<标识符> <疑似指令参数>」的块外行（如 `bogus auto`），
+// 以便报「未知指令」而不是笼统的语法错误。allow 已是合法动作词，不再列入。
 func looksLikeUnknownDirective(fields []string) bool {
 	if len(fields) < 2 {
 		return false
@@ -1482,7 +1488,7 @@ func looksLikeUnknownDirective(fields []string) bool {
 		return false
 	}
 	switch strings.ToLower(fields[1]) {
-	case "deny", "allow", "auto", "off":
+	case "deny", "auto", "off":
 		return true
 	default:
 		return false

@@ -5,7 +5,7 @@ import (
 	"testing"
 )
 
-// TestStandaloneFallbackShorthand 块外兜底简写：[log] accept|drop|reject ≡ verdict { * }。
+// TestStandaloneFallbackShorthand 块外兜底简写：[log] accept|allow|drop|reject ≡ verdict { * }。
 func TestStandaloneFallbackShorthand(t *testing.T) {
 	base := "v6-bootstrap off\naccept { 1.1.1.1 -> 80 }\n"
 	shorthand := base + "drop\n"

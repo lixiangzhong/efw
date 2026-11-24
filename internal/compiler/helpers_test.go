@@ -122,7 +122,7 @@ func blockifyTopLine(line string) (string, bool) {
 		}
 		return action + " { *" + suffix + " }", true
 	}
-	// 规则行尾部动作：<match> [log] accept|drop|reject
+	// 规则行尾部动作：<match> [log] accept|allow|drop|reject
 	last := strings.ToLower(fields[len(fields)-1])
 	if !isActionWord(last) {
 		return "", false
@@ -145,7 +145,7 @@ func blockifyTopLine(line string) (string, bool) {
 
 func isActionWord(s string) bool {
 	switch strings.ToLower(s) {
-	case "accept", "drop", "reject":
+	case "accept", "allow", "drop", "reject":
 		return true
 	}
 	return false

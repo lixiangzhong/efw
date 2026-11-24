@@ -49,6 +49,11 @@ var formatCases = []formatCase{
 		want: "masquerade {\n    eth0\n    10.0.0.0/8 -> eth1\n}\n\ndrop { * }\n",
 	},
 	{
+		name: "allow 别名与 accept 同样缩进",
+		in:   "allow{\n1.1.1.1->80\n}\nALLOW { 2.2.2.2 }\nlog allow\n",
+		want: "allow {\n    1.1.1.1 -> 80\n}\nALLOW { 2.2.2.2 }\nlog allow\n",
+	},
+	{
 		name: "CRLF BOM 与末尾空行",
 		in:   "\ufeffv6-bootstrap off\r\n\r\n\r\naccept{1.1.1.1}\r\ndrop\r\n",
 		want: "v6-bootstrap off\n\naccept { 1.1.1.1 }\ndrop\n",

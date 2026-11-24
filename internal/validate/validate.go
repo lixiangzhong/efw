@@ -11,7 +11,7 @@ import (
 // reservedSetNames 是不能用作命名集合名的保留字（小写比较）：DSL 关键字、
 // nft 结构关键字，以及产物里的内置链名/集合名。
 var reservedSetNames = map[string]struct{}{
-	"accept": {}, "drop": {}, "reject": {}, "log": {}, "iface": {},
+	"accept": {}, "allow": {}, "drop": {}, "reject": {}, "log": {}, "iface": {},
 	"private": {}, "masquerade": {}, "established": {}, "v6-bootstrap": {},
 	"forward": {}, "auto": {}, "off": {}, "default": {}, "set": {},
 	"table": {}, "chain": {}, "type": {}, "hook": {}, "priority": {},

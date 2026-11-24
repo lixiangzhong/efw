@@ -18,6 +18,7 @@ const (
 // blockKeywords 是可作块头的关键字（大小写不敏感）。
 var blockKeywords = map[string]struct{}{
 	"accept":     {},
+	"allow":      {},
 	"drop":       {},
 	"reject":     {},
 	"masquerade": {},
