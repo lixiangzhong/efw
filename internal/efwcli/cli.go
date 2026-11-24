@@ -113,8 +113,8 @@ func newCommand(app App, stdin io.Reader, stdout, stderr io.Writer) *cli.Command
 	return &cli.Command{
 		Name:        app.Name,
 		Usage:       app.Usage,
-		UsageText:   fmt.Sprintf("%s <file> [flags]\n   %s compile [flags] [file]\n   %s apply [flags] [file]\n   %s format [--write|--check] [file]", app.Name, app.Name, app.Name, app.Name),
-		Description: "DSL → nftables ruleset 文本（compile）、编译后原子应用到内核（apply，需 root/CAP_NET_ADMIN），或格式化源文件（format）。不给文件时从 stdin 读取。",
+		UsageText:   fmt.Sprintf("%s <file> [flags]\n   %s -c <file>\n   %s compile [flags] [file]\n   %s apply [flags] [file]\n   %s format [--write|--check] [file]", app.Name, app.Name, app.Name, app.Name, app.Name),
+		Description: "DSL → nftables ruleset 文本（compile）、编译后原子应用到内核（apply，需 root/CAP_NET_ADMIN）、格式化源文件（format），或用 -c 只做检查（不输出产物）。不给文件时从 stdin 读取。",
 		Version:     app.Version,
 		Reader:      stdin,
 		Writer:      stdout,
@@ -124,8 +124,8 @@ func newCommand(app App, stdin io.Reader, stdout, stderr io.Writer) *cli.Command
 		OnUsageError: func(ctx context.Context, cmd *cli.Command, err error, isSubcommand bool) error {
 			return usageErrorf("%v", err)
 		},
-		// 根命令直接接受编译参数，用于 shebang：#!/usr/local/bin/efw -f
-		Flags: compileFlags(),
+		// 根命令直接接受编译参数与 -c，用于 shebang 与 `efw -c <file>`。
+		Flags: append([]cli.Flag{checkFlag()}, compileFlags()...),
 		Commands: []*cli.Command{
 			compileCommand(app, stdin, stdout, stderr),
 			applyCommand(app, stdin, stderr),
@@ -138,11 +138,23 @@ func newCommand(app App, stdin io.Reader, stdout, stderr io.Writer) *cli.Command
 	}
 }
 
+// checkFlag 是根命令的检查开关：只校验 DSL、不输出产物。
+func checkFlag() cli.Flag {
+	return &cli.BoolFlag{
+		Name:    "check",
+		Aliases: []string{"c"},
+		Usage:   "只检查 DSL（完整编译校验，不输出产物）；成功静默 exit 0，错误 exit 1",
+	}
+}
+
 func rootAction(app App, cmd *cli.Command, stdin io.Reader, stdout, stderr io.Writer) error {
 	// 两种文件形态：
 	//   efw <file> [flags]        —— 根命令位置参数；也是无 -f shebang 的调用形态
 	//   efw -f <file> [flags]     —— 显式 -f（等价，兼容旧写法）
-	if cmd.IsSet("file") || cmd.Args().Len() > 0 {
+	if cmd.IsSet("file") || cmd.Args().Len() > 0 || cmd.Bool("check") {
+		if cmd.Bool("check") {
+			return checkAction(app, cmd, cmd.Args().Slice(), stdin, stderr)
+		}
 		return compileAction(app, cmd, cmd.Args().Slice(), stdin, stdout, stderr)
 	}
 	// 无参数：帮助打印到 stderr（与旧行为一致），并以用法错误退出。
@@ -150,7 +162,7 @@ func rootAction(app App, cmd *cli.Command, stdin io.Reader, stdout, stderr io.Wr
 	cmd.Writer = cmd.ErrWriter
 	_ = cli.DefaultShowRootCommandHelp(cmd)
 	cmd.Writer = writer
-	return usageErrorf("缺少子命令（仅支持 compile/apply/format）")
+	return usageErrorf("缺少子命令（仅支持 compile/apply/format，或用 -c 检查文件）")
 }
 
 func compileFlags() []cli.Flag {
@@ -328,6 +340,28 @@ func compileAction(app App, cmd *cli.Command, positional []string, stdin io.Read
 	}
 	if writeErr := os.WriteFile(opts.output, result.ruleset, 0o644); writeErr != nil {
 		return usageErrorf("无法写入文件：%v", writeErr)
+	}
+	return nil
+}
+
+// checkAction 对 DSL 做完整编译校验（解析 + 语义 + 产物生成），成功时不输出任何内容。
+//
+// 只做语法解析不够：缺兜底、地址族冲突等语义错误同样会让 apply 失败，
+// -c 必须与 compile/apply 同口径，否则检查通过但落地失败。告警仍按 --quiet 输出。
+func checkAction(app App, cmd *cli.Command, positional []string, stdin io.Reader, stderr io.Writer) error {
+	opts, err := collectOptions(cmd)
+	if err != nil {
+		return err
+	}
+	if opts.output != "" {
+		return usageErrorf("-c/--check 不能与 -o/--output 同时使用（检查不产出产物）")
+	}
+	priority, optErr := checkOptions(opts.table, opts.chain, opts.hook, opts.priority, opts.logPrefix)
+	if optErr != nil {
+		return &commandError{code: 2, lines: []string{optErr.Format()}}
+	}
+	if _, err := buildCompiled(app, opts, priority, positional, stdin, stderr); err != nil {
+		return err
 	}
 	return nil
 }
