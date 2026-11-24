@@ -13,6 +13,7 @@ efw compile \
 
 | 参数 | 默认 | 说明 |
 |:--|:--|:--|
+| `-c, --check` | 关 | 只检查 DSL（**仅根命令**，即 `efw -c <file>`；完整编译校验，不产出产物；成功静默；与 `-o` 互斥） |
 | `-f, --file` | — | 显式指定 DSL 文件（等价 `efw <file>` 位置参数） |
 | `--table` | `efw` | table 名，不能是 nft 关键字 |
 | `--chain` | `input` | chain 名，不能是 nft 关键字；也不能是 `forward` / `postrouting`（与内置链冲突） |
@@ -22,7 +23,21 @@ efw compile \
 | `--stamp` | 关 | 产物头追加生成时间（会破坏确定性） |
 | `--quiet` | 关 | 抑制 warning |
 
-退出码：`0` 成功（可有 warning）/ `1` 编译错误 / `2` 用法错误或 apply 环境失败（nft 缺失、权限不足、nft 执行失败，`E104`）。错误统一为 `<file>:<line>:<col>: <category>: <code>: <message>`。
+退出码：`0` 成功（可有 warning）/ `1` 编译错误 / `2` 用法错误或 apply 环境失败（nft 缺失、权限不足、nft 执行失败，`E104`）。`-c/--check` 沿用同一套退出码：通过 `0`（静默）、检查不通过 `1`、参数错误 `2`。错误统一为 `<file>:<line>:<col>: <category>: <code>: <message>`。
+
+## 只检查（-c/--check）
+
+`efw -c rules.acl` 只做完整编译校验（解析 + 语义 + 产物生成），不写任何文件、不接触内核：
+
+```bash
+efw -c rules.acl
+cat rules.acl | efw -c          # 也支持 stdin
+```
+
+- 通过时静默（warning 仍按 `--quiet` 规则打印），退出码 `0`；不通过时输出错误，退出码 `1`。
+- 检查口径与 `compile`/`apply` 相同：缺兜底、地址族冲突、命名集合未定义等语义问题都会报出，不只是语法。
+- 与 `-o/--output` 互斥（E103）；`--table`/`--chain` 等部署参数校验照常生效。
+- 只覆盖 DSL 层；nft 层确认仍用 `nft -c -f rules.nft` 或 `efw apply`（apply 内部会自动跑 `nft -c`）。
 
 ## 直接应用（apply）
 

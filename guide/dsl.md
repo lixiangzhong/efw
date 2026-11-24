@@ -108,6 +108,8 @@ drop {
 块内 action 省略并继承块动作，显式写的动作必须与块头一致；规则按块与块内文本顺序展开。
 **块外不能写普通规则**（会报 E101）；兜底可写 `drop { * }`，也可简写为 `drop`（支持 `log drop`、`accept`）。
 
+`allow` 是 `accept` 的别名（大小写不敏感）：`allow { ... }`、单行 `allow { ... }`、兜底 `allow` / `log allow`、块内规则尾部的 `allow` 都与 `accept` 完全等价；产物、告警与 nft 输出统一为 `accept`。`allow` 因此不能再用作命名集合名。
+
 ## masquerade（出站源 NAT）
 
 `masquerade` 是独立的顶层块，生成 `postrouting` 链（`type nat hook postrouting priority 90`），按源地址/出接口做源 NAT：

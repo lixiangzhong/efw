@@ -84,7 +84,7 @@ drop                     # 兜底：以上都不匹配的一律丢弃
 ```
 
 > 没有 `default` 指令：链 `policy` 恒为 `accept`，**文件最后一条必须是匹配一切的兜底规则**，否则编译报错（E100）。`drop` 可换成 `accept` 或 `log drop`，都等价于 `verdict { * }`。
-> 块外只允许文件头指令与兜底简写 `[log] accept|drop|reject`；普通规则必须写在 `accept { ... }` / `drop { ... }` / `reject { ... }` 块内。
+> 块外只允许文件头指令与兜底简写 `[log] accept|allow|drop|reject`；普通规则必须写在 `accept { ... }` / `drop { ... }` / `reject { ... }` 块内。`allow` 是 `accept` 的别名，两者行为完全一致（产物统一输出 `accept`）。
 
 也可以让 ACL 文件自己可执行：带 `apply` 参数直接生效，不带则只输出产物。
 
@@ -109,13 +109,16 @@ chmod +x rules.acl
 编译与加载：
 
 ```bash
+efw -c rules.acl                 # 只检查（完整编译校验，不输出产物，成功静默）
 efw compile rules.acl            # 产物写到 stdout
 efw compile -o rules.nft rules.acl
 cat rules.acl | efw compile      # 也可从 stdin 读
 
-nft -c -f rules.nft   # 语法自检（需要 root / NET_ADMIN）
+nft -c -f rules.nft   # nft 层语法自检（需要 root / NET_ADMIN）
 nft -f rules.nft      # 真正生效
 ```
+
+> `-c/--check` 与 `compile`/`apply` 同口径：缺兜底、地址族冲突这类语义错误也会报出，不只是语法。通过时静默（`exit 0`，warning 仍打印）；检查不通过 `exit 1`；参数错误 `exit 2`。它与 `-o` 互斥，也不接触内核。
 
 ## DSL 速查
 
@@ -123,9 +126,9 @@ nft -f rules.nft      # 真正生效
 established auto|off               # 默认 auto：链首放行已建立连接
 v6-bootstrap auto|off              # 默认 auto：兜底为 drop/reject 时放行 IPv6 NDP/MLD/ICMPv6 错误与 DHCPv6
 
-accept { <规则> }                  # 块内省略 action，继承块动作
+accept { <规则> }                  # 块内省略 action，继承块动作（allow 是 accept 的别名）
 drop { <规则> }                    # 同上（reject 同理）
-accept { * } / drop { * }          # 兜底：匹配一切，必须最后一条（可简写为 accept / drop）
+accept { * } / drop { * }          # 兜底：匹配一切，必须最后一条（可简写为 accept / allow / drop）
 iface <name|prefix*> [log]         # 整卡规则：该入口网卡上的全部流量（动作继承块头；支持尾缀 *）
 private                            # 独立一行：私有源地址（RFC1918 + RFC4193 ULA）
 NAME { <IP|CIDR> ... }             # 命名集合：v4/v6 可混写，产物拆成 NAME_v4/NAME_v6（仅作源地址）
@@ -140,7 +143,7 @@ masquerade { <出接口> | <源地址> -> <出接口> }   # 出站源 NAT（内�
 | `iface` | 入口网卡名（`eth0`、`ens3`；独立成规则 `iface eth0`，≤15 字符；支持尾缀 `*` 通配，如 `iface br-*`、`iface docker*`） |
 | `proto` | `tcp`、`udp`、`icmp`（双栈）；`tcp4`/`tcp6`/`udp4`/`udp6`/`icmp4`/`icmp6`（单栈）；省略 = 任意协议 |
 | `port` | `80`、`80-90`、`80,443`（或 `{80,443}`）、`*`；一律指目的端口 |
-| `action` | 由块头决定；块内 `log` 是修饰（log + 块动作），无单独 log |
+| `action` | 由块头决定：`accept`（或别名 `allow`）、`drop`、`reject`；块内 `log` 是修饰（log + 块动作），无单独 log |
 
 常见简写（完整列表与边界见 [DSL 参考](guide/dsl.md)）：
 
