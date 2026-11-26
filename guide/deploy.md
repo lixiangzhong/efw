@@ -18,7 +18,7 @@ efw compile \
 | `--table` | `efw` | table 名，不能是 nft 关键字 |
 | `--chain` | `input` | chain 名，不能是 nft 关键字；也不能是 `forward` / `postrouting`（与内置链冲突） |
 | `--hook` | `input` | v1 仅支持 input |
-| `--priority` | `filter` | `raw`/`mangle`/`filter`/`security`/`dstnat`/`srcnat` 或 32 位整数（关键字统一小写） |
+| `--priority` | `-99` | input 与 forward 链的 priority：`raw`/`mangle`/`filter`/`security`/`dstnat`/`srcnat` 或 32 位整数（关键字统一小写）；ACL 的 `priority` 指令在未显式指定时生效 |
 | `--log-prefix` | `"efw: "` | 原样输出；非空，不得含引号/反斜杠/控制字符 |
 | `--stamp` | 关 | 产物头追加生成时间（会破坏确定性） |
 | `--quiet` | 关 | 抑制 warning |
@@ -63,6 +63,7 @@ cat rules.acl | efw apply      # stdin
 - `efw` 与 `efw-nft08` 共用 apply 传输层（`/dev/stdin`、`nft list tables`、含 `delete` 的最终批次校验），差异只在编译产物方言。
 - 只替换自己的 `table inet <table>`，不执行 `flush ruleset`，不碰容器运行时（Docker/Podman）的链；nft 批次是原子的，失败不会留下半套规则。
 - apply 不做自动备份——规则源文件就是唯一事实来源；`-o/--output` 只属于 `compile`，`apply` 不接受。
+- 文件头 `output /etc/nftables.d/efw.nft`：apply **成功后**把同一份产物写到该路径（自动创建父目录、权限 `0644`、同目录临时文件 + rename 原子覆盖、拒绝符号链接）；写失败返回 `E104`（exit 2）并注明「规则已生效」。`compile` 与 `-c` 不写这个文件。
 - 与 `/etc/fw.sh` 的差异：efw 默认全局生效（可用独立 `iface <网卡名>` 规则按入口网卡整卡放行/拒绝），也不使用 ipset。
 - shebang 用法：`#!/usr/local/bin/efw apply`；`rc.local` 直接调用同一文件即可开机重建。想沿用 `/etc/fw.sh` 的习惯，把 ACL 写到 `/etc/fw.sh`、首行加同一 shebang 并 `chmod +x`，之后照旧「编辑 → 执行」。
 
@@ -94,14 +95,14 @@ Docker/Podman（rootful）的发布端口（`-p 8080:80`）走的是 **DNAT + FO
 
 | 链 | hook / priority | 匹配语义 |
 |:--|:--|:--|
-| `input` | `input` / `filter` | 宿主本机端口（dport） |
-| `forward` | `forward` / `-10` | 仅 `ct status dnat` 流量；端口按**宿主发布端口**匹配（`ct original proto-dst`），目的地址按 DNAT 前地址匹配（`ct original ip daddr`） |
+| `input` | `input` / `-99`（默认；可被 ACL `priority` 指令或 `--priority` 覆盖） | 宿主本机端口（dport） |
+| `forward` | `forward` / 与 input 同一生效值 | 仅 `ct status dnat` 流量；端口按**宿主发布端口**匹配（`ct original proto-dst`），目的地址按 DNAT 前地址匹配（`ct original ip daddr`） |
 
 forward 链产物：
 
 ```nft
 chain forward {
-    type filter hook forward priority -10; policy accept;
+    type filter hook forward priority -99; policy accept;
 
     ct state established,related accept
 
@@ -139,6 +140,25 @@ chain postrouting {
 - `--chain postrouting` 被禁用（与内置 NAT 链冲突）；没有 `masquerade` 块时不生成该链。
 - 验证时可用独立 `--table efw_nat_test` + netns/veth 做「未 NAT → NAT」A/B，测完 `nft delete table inet efw_nat_test`，不碰生产表与 `/etc/fw.sh`。
 
+## 入站目的 NAT（dnat）
+
+`dnat` 块生成同一张 `table inet <table>` 里的 `prerouting` nat 链，用于本机端口重定向（等价 iptables `REDIRECT`）与跨机端口转发（等价 `DNAT`）：
+
+```nft
+chain prerouting {
+    type nat hook prerouting priority dstnat + 1; policy accept;
+    iifname "eth0" udp dport 20000-50000 redirect to :443
+}
+```
+
+- priority `dstnat + 1`（-99）**晚于** iptables/Docker 的 dstnat（-100）：容器已发布端口先被 Docker DNAT，efw 只处理剩下的流量；不要依赖同优先级下的跨表顺序。
+- 本机重定向之后流量进入 `input` 链，目标端口必须显式放行；漏写时编译期给 W5（不阻断编译）。
+- `redirect` 会改写目的地址：服务需要原目的信息时用 `IP_RECVORIGDSTADDR` 取回；透明代理场景应评估 TPROXY，而不是靠 dnat 还原。
+- 跨机 DNAT 的转发放行落在 `forward` 链（`ct status dnat`），需要 `ip_forward=1` 且 FORWARD 策略允许。
+- 需要内核 ≥ 5.2（`inet` 族 NAT）；`efw-nft08` 出现 dnat 直接报 E102。
+- 只影响新连接：已有 conntrack 条目保持原映射，验证要用新五元组。
+- `--chain prerouting` 被禁用（与内置链冲突）；没有 `dnat` 块时不生成该链。
+
 ## Podman 说明
 
 Podman 与 Docker 的差异集中在网络后端，对 efw 的影响只有网桥名字和发布端口的路径：
@@ -150,5 +170,5 @@ Podman 与 Docker 的差异集中在网络后端，对 efw 的影响只有网桥
 | rootless（pasta / slirp4netns） | 没有宿主侧 DNAT，发布端口由用户态转发进程监听，按 `input` 链的端口 ACL 过滤；容器访问宿主服务的源地址是宿主地址/loopback，被拦时在 ACL 显式放行 |
 
 - efw 不做运行时探测；网桥名字可用 `ip -br link` 确认后写进 ACL。
-- Podman 的隔离链同样在 filter priority 0，efw 的 `-10` 仍然先决策。
+- Podman 的隔离链同样在 filter priority 0，efw 的 `-99` 仍然先决策。
 - 与 Docker 相同：默认网络子网（`10.88.0.0/16`、`172.17.0.0/16`）会整段放行。如果宿主的真实内网恰好落在这些网段，需要留意这是「视为内部」而非「仅容器」。

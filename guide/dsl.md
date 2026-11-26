@@ -8,7 +8,7 @@
 |:--|:--|
 | `src` / `dst` | IPv4/IPv6 字面量、CIDR、`*`；`src` 还支持命名集合名 |
 | `private` | 私有源地址集合：IPv4 RFC1918（`10.0.0.0/8`、`172.16.0.0/12`、`192.168.0.0/16`）+ IPv6 ULA（`fc00::/7`）；**仅单独成行**（可加 `log`） |
-| `iface` | 入口网卡名（独立规则：`accept { iface eth0 }`；≤15 字符；支持尾缀 `*` 通配，如 `br-*`） |
+| `iface` | 入口网卡名（动作块内独立规则：`accept { iface eth0 }`；dnat 块内可与其它条件组合；≤15 字符；支持尾缀 `*` 通配，如 `br-*`） |
 | `proto` | `tcp`、`udp`、`icmp`（双栈）；`tcp4`/`tcp6`/`udp4`/`udp6`/`icmp4`/`icmp6`（单栈）；省略 = 任意协议 |
 | `port` | `80`、`80-90`、`80,443` 或 `{80,443}`（等价）、`*`（省略 = 任意端口） |
 | `action` | 由块头决定：`accept`、`drop`、`reject`；块内 `log` 为修饰（log + 块动作），无单独 log |
@@ -17,6 +17,36 @@
 - 语法里的“端口”一律指**目的端口（dport）**；本语法没有源端口写法，需要时直接改 nft 产物。
 - 协议 token 独立，可放在匹配部分任意位置，每规则最多一次；`tcp`/`udp`/`icmp` 为双栈，`*-4`/`*-6` 只匹配对应地址族。
 - 旧 `proto://` 写法已移除（会报迁移错误）。
+
+## 文件头 priority 与 output
+
+### priority
+
+`priority <nft 关键字|32 位整数>` 设置 `input` 与 `forward` 两条链的 priority，默认 `-99`：
+
+```text
+priority -99          # 默认值，可省略
+priority filter       # nft 关键字，产物保持关键字
+priority 10           # 32 位整数
+```
+
+- 取值只能是 `raw`/`mangle`/`filter`/`security`/`dstnat`/`srcnat`（大小写不敏感，产物统一小写）或 32 位整数；其它值报 E102。
+- 与其它文件头指令一样，必须位于所有规则之前；重复出现报 E100。
+- 优先级关系：显式 `--priority` > ACL 的 `priority` 指令 > flag 默认值 `-99`。
+- `-99` 会排在所有 priority `0` 的 filter 链（firewalld/ufw/容器运行时）之前；efw 有兜底 `drop`，等于由 efw 独占裁决。
+
+### output
+
+`output <绝对路径.nft>` 让 `apply` 成功后把同一份产物写到该文件（`compile` 与 `-c` 不写）：
+
+```text
+output /etc/nftables.d/efw.nft
+```
+
+- 必须是绝对路径且以 `.nft` 结尾（大小写不敏感），否则报 E102；重复出现报 E100。
+- 写入时机是 **apply 成功之后**，文件即「已生效规则」的快照；应用失败不会写文件。
+- 自动创建父级目录（0755），文件权限固定 `0644`，同目录临时文件 + rename 原子覆盖。
+- 目标已是符号链接时拒绝写入；写失败返回 `E104`（exit 2），错误信息会注明「规则已生效」，避免误判为整体失败。
 
 ## 简写（与完整写法完全等价，全部写在块内）
 
@@ -134,3 +164,34 @@ masquerade {
 - `--chain postrouting` 被禁用（与内置链冲突）。
 - 需要内核 ≥ 5.2（`inet` 族 NAT）。NAT 只做地址转换，转发流量是否放行由 `ip_forward` 与 FORWARD 策略决定；efw 的 `forward` 链只处理 DNAT 流量。
 - 出接口一般填 WAN 口；`compile` 不校验网卡是否存在。可用 `nft -c -f` 或 `efw apply` 在目标机校验。
+
+## dnat（入站目的 NAT）
+
+`dnat` 块生成 `prerouting` 链（`type nat hook prerouting priority dstnat + 1`），用于入站端口重定向与跨机端口转发：
+
+```text
+# 端口汇聚：eth0 上进来的 UDP 20000-50000 全部改到本机 443（等价 iptables REDIRECT）
+dnat {
+    iface eth0 udp 20000-50000 -> 443
+}
+
+# 跨机端口转发（等价 iptables DNAT）
+dnat {
+    iface eth0 tcp 8080 -> 10.0.0.5:8080
+    iface eth0 tcp 8443 -> [2001:db8::5]:8443
+    iface eth0 tcp 9090 -> 10.0.0.6           # 只改地址，端口保持 9090
+}
+```
+
+- 条目语法：`<匹配部分> -> <目标>`。`->` 左边是匹配条件（`iface` / 协议 / 源地址 / 目的端口，顺序不限，源地址可省略），右边是 NAT 目标；**dnat 块内 `iface` 可以与其它条件组合**（动作块仍要求 iface 独立成行，见 D45）。
+- 与动作块不同，`->` 左侧没有「目的地址」的位置，因此**不支持按原目的地址匹配**；需要按 VIP 原目的转发时，可后续增加 `daddr` 关键字。
+- `->` 右侧只写端口 = **本机重定向**（nft `redirect to :port`）；写地址 = **跨机转发**（nft `dnat ip to` / `dnat ip6 to`，inet 表必须显式地址族，产物会自动补 `ip`/`ip6` 或 `meta nfproto`）。
+- 目标单端口支持多对一（`udp 20000-50000 -> 443`）；目标写范围时必须与匹配范围**等长**（`udp 5000-5100 -> 6000-6100`）。目标写多个端口/集合、以及不等长范围都报 E102。
+- 跨机目标的地址族必须与匹配侧一致：`tcp4`、IPv4 源/目的地址不能转发到 IPv6 目标，反之亦然。
+- 源地址不支持命名集合引用（写具体网段或 `*`）；`private` 也不能用。
+- **重定向后必须放行目标端口**：`redirect` 把包改成「到本机」，之后走 `input` 链；默认零信任下未放行会被兜底丢弃。编译期检查，找不到对应 `accept` 时给 `W5` 告警。
+- 可写多个块、多行；**严格按书写顺序生成，不去重/不重排**——NAT 首条匹配生效。
+- `dnat` 不替代兜底规则：文件仍需满足「展开后最后一条匹配一切」的要求（如 `drop` / `accept`）。
+- `--chain prerouting` 被禁用（与内置链冲突）；`efw-nft08` 出现 dnat 直接报 E102（0.8 没有 inet 族 NAT）。
+- 需要内核 ≥ 5.2。`redirect` 会改写目的地址：服务需要原目的信息时用 `IP_RECVORIGDSTADDR` 取回；透明代理场景应评估 TPROXY 而不是 dnat。
+- prerouting 链 priority 是 `dstnat + 1`，排在 iptables/Docker 的 `dstnat`(-100) 之后，不会抢容器已发布端口。
