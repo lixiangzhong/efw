@@ -17,7 +17,7 @@ table inet efw {
     }
 
     chain input {
-        type filter hook input priority filter; policy accept;
+        type filter hook input priority -99; policy accept;
 
         # auto: 本机回环放行（唯一的隐式信任：本机访问自身地址也走 lo；其余来源一律走 ACL）
         iifname "lo" accept
@@ -53,7 +53,7 @@ table inet efw {
     }
 
     chain forward {
-        type filter hook forward priority -10; policy accept;
+        type filter hook forward priority -99; policy accept;
 
         # 说明: 本链只匹配 DNAT 转发流量（如容器发布端口）
 

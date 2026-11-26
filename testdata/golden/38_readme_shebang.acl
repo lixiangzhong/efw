@@ -1,0 +1,7 @@
+#!/usr/local/bin/efw apply
+
+accept {
+    1.1.4.0/24 -> 22
+}
+
+drop

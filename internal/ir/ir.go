@@ -7,6 +7,7 @@ package ir
 import (
 	"fmt"
 	"sort"
+	"strconv"
 	"strings"
 )
 
@@ -211,6 +212,29 @@ type Masquerade struct {
 	Iface string // 出接口名（必填）
 }
 
+// DnatTarget 是一条目的 NAT 规则的目标。
+//
+// Local 为 true 时只改写目的端口并把流量重定向到本机（nft `redirect to :port`，
+// 等价 iptables 的 REDIRECT）；否则把目的地址（可选端口）改写为 Addr
+// （nft `dnat ip|ip6 to`，等价 iptables 的 DNAT）。
+type DnatTarget struct {
+	Local bool
+	Addr  Addr    // Local=false 时有效；必须是具体地址，不支持 Any/CIDR
+	Ports PortSet // 空表示不改端口（仅 Local=false 允许）
+}
+
+// Dnat 是一条入站目的 NAT 规则（prerouting/dstnat 链）。
+// 与 Masquerade 一样按书写顺序生成（NAT 首条匹配生效），不参与 verdict/兜底/优化。
+type Dnat struct {
+	Line   int
+	Raw    string
+	Iface  string // 入口网卡（iifname）；空表示任意入口
+	Src    Addr   // 源地址匹配；Any 表示不限制来源
+	Proto  Proto
+	Ports  PortSet // 匹配的目的端口
+	Target DnatTarget
+}
+
 // NamedSet 是用户定义的命名集合。DSL 层一个块可混写 IPv4/IPv6；因为 nft set
 // 是单地址族的，产物按族拆成 <Name>_v4 / <Name>_v6（哪个族有元素才生成哪个）。
 type NamedSet struct {
@@ -244,9 +268,51 @@ type File struct {
 	Established bool // true = auto
 	V6Bootstrap bool // true = auto
 	Forward     bool // true = auto（同时生成 forward 链，仅匹配 DNAT 流量）
+	// Priority 是 ACL 文件头 `priority` 指令的值（已归一）；空字符串表示文件未指定。
+	Priority string
+	// Output 是 ACL 文件头 `output` 指令的落盘路径（已 Clean）；仅 apply 成功后写入，空字符串表示未指定。
+	Output      string
 	Rules       []Rule
 	Masquerades []Masquerade
+	Dnats       []Dnat
 	Sets        []NamedSet
+}
+
+// PriorityDefault 是 input 与 forward 链的默认 priority（可由 --priority 或 ACL 指令覆盖）。
+const PriorityDefault = "-99"
+
+// ResolvePriority 返回 input 与 forward 链实际使用的 priority。
+//
+// explicit 为 true 表示命令行显式给了 given（--priority），它优先于文件里的 priority 指令；
+// 否则文件指令优先，未写指令时回落到 given（命令行默认值）。
+func (f *File) ResolvePriority(given string, explicit bool) string {
+	if !explicit && f.Priority != "" {
+		return f.Priority
+	}
+	return given
+}
+
+// priorityKeywords 是 nft priority 关键字；产物统一小写输出。
+var priorityKeywords = map[string]struct{}{
+	"raw":      {},
+	"mangle":   {},
+	"filter":   {},
+	"security": {},
+	"dstnat":   {},
+	"srcnat":   {},
+}
+
+// NormalizePriority 校验并归一 priority 取值：nft 关键字统一小写，整数规范化为十进制。
+// ok=false 表示既不是关键字也不是 32 位整数。parser 与 CLI 共用这一份规则。
+func NormalizePriority(raw string) (string, bool) {
+	if _, ok := priorityKeywords[strings.ToLower(raw)]; ok {
+		return strings.ToLower(raw), true
+	}
+	value, err := strconv.ParseInt(raw, 10, 32)
+	if err != nil {
+		return "", false
+	}
+	return strconv.FormatInt(value, 10), true
 }
 
 // MatchesAll 报告规则是否匹配一切（用于识别兜底规则）。

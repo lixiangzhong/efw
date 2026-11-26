@@ -18,7 +18,7 @@ func TestNft08Compile(t *testing.T) {
 		t.Fatalf("exit=%d stderr:\n%s", exit, stderr.String())
 	}
 	text := stdout.String()
-	for _, want := range []string{"priority 0;", "tcp dport 80 accept", "udp dport 80 accept"} {
+	for _, want := range []string{"priority -99;", "tcp dport 80 accept", "udp dport 80 accept"} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("产物缺少 %q:\n%s", want, text)
 		}

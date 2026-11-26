@@ -8,28 +8,20 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"regexp"
-	"strconv"
 	"strings"
 	"time"
 
 	"github.com/lixiangzhong/efw/internal/errs"
+	"github.com/lixiangzhong/efw/internal/ir"
+	"github.com/lixiangzhong/efw/internal/parser"
 	"github.com/urfave/cli/v3"
 )
 
 var (
 	// identifierRe 校验 table/chain 名：nft 标识符规则。
 	identifierRe = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
-
-	// priorityKeywords 是可用的 nft priority 关键字（产物中统一小写输出）。
-	priorityKeywords = map[string]struct{}{
-		"raw":      {},
-		"mangle":   {},
-		"filter":   {},
-		"security": {},
-		"dstnat":   {},
-		"srcnat":   {},
-	}
 
 	// reservedNftWords 是 nft 语法关键字，不能用作 table/chain 名。
 	reservedNftWords = map[string]struct{}{
@@ -41,15 +33,16 @@ var (
 
 // Options 是一次编译所需的参数。
 type Options struct {
-	Table     string
-	Chain     string
-	Hook      string
-	Priority  string
-	LogPrefix string
-	Version   string
-	Source    string
-	Stamp     bool
-	Now       time.Time
+	Table       string
+	Chain       string
+	Hook        string
+	Priority    string
+	PrioritySet bool // 命令行显式指定 priority（true 时覆盖 ACL 指令）
+	LogPrefix   string
+	Version     string
+	Source      string
+	Stamp       bool
+	Now         time.Time
 }
 
 // Compiler 把 DSL 源码编译为 ruleset。
@@ -170,9 +163,9 @@ func compileFlags() []cli.Flag {
 		&cli.StringFlag{Name: "file", Aliases: []string{"f"}, Usage: "从文件读取 DSL（用于 shebang：#!/usr/local/bin/efw -f）"},
 		&cli.StringFlag{Name: "output", Aliases: []string{"o"}, Usage: "输出文件（默认 stdout）"},
 		&cli.StringFlag{Name: "table", Value: "efw", Usage: "table 名"},
-		&cli.StringFlag{Name: "chain", Value: "input", Usage: "chain 名（不能是 forward/postrouting）"},
+		&cli.StringFlag{Name: "chain", Value: "input", Usage: "chain 名（不能是 forward/postrouting/prerouting）"},
 		&cli.StringFlag{Name: "hook", Value: "input", Usage: "hook（v1 仅支持 input）"},
-		&cli.StringFlag{Name: "priority", Value: "filter", Usage: "priority（nft 关键字或 32 位整数）"},
+		&cli.StringFlag{Name: "priority", Value: ir.PriorityDefault, Usage: "input/forward 链 priority（nft 关键字或 32 位整数；ACL 的 priority 指令在未显式指定时生效）"},
 		&cli.StringFlag{Name: "log-prefix", Value: "efw: ", Usage: "log 前缀（原样输出）"},
 		&cli.BoolFlag{Name: "stamp", Usage: "产物头追加生成时间"},
 		&cli.BoolFlag{Name: "quiet", Usage: "抑制 warning"},
@@ -197,28 +190,30 @@ func compileCommand(app App, stdin io.Reader, stdout, stderr io.Writer) *cli.Com
 
 // compileOptions 是从 Flag 中解析出的编译参数。
 type compileOptions struct {
-	file      string
-	output    string
-	table     string
-	chain     string
-	hook      string
-	priority  string
-	logPrefix string
-	stamp     bool
-	quiet     bool
+	file        string
+	output      string
+	table       string
+	chain       string
+	hook        string
+	priority    string
+	prioritySet bool
+	logPrefix   string
+	stamp       bool
+	quiet       bool
 }
 
 func collectOptions(cmd *cli.Command) (compileOptions, error) {
 	opts := compileOptions{
-		file:      cmd.String("file"),
-		output:    cmd.String("output"),
-		table:     cmd.String("table"),
-		chain:     cmd.String("chain"),
-		hook:      cmd.String("hook"),
-		priority:  cmd.String("priority"),
-		logPrefix: cmd.String("log-prefix"),
-		stamp:     cmd.Bool("stamp"),
-		quiet:     cmd.Bool("quiet"),
+		file:        cmd.String("file"),
+		output:      cmd.String("output"),
+		table:       cmd.String("table"),
+		chain:       cmd.String("chain"),
+		hook:        cmd.String("hook"),
+		priority:    cmd.String("priority"),
+		prioritySet: cmd.IsSet("priority"),
+		logPrefix:   cmd.String("log-prefix"),
+		stamp:       cmd.Bool("stamp"),
+		quiet:       cmd.Bool("quiet"),
 	}
 	if cmd.IsSet("output") && opts.output == "" {
 		return opts, usageErrorf("输出路径不能为空")
@@ -243,10 +238,11 @@ func applyCommand(app App, stdin io.Reader, stderr io.Writer) *cli.Command {
 	}
 }
 
-// compileResult 是编译产物与告警。
+// compileResult 是编译产物、告警与 output 指令的落盘路径。
 type compileResult struct {
-	ruleset []byte
-	warns   []errs.Warning
+	ruleset    []byte
+	warns      []errs.Warning
+	outputPath string
 }
 
 // readSource 解析输入来源：-f/--file、唯一位置参数，否则 stdin。
@@ -284,16 +280,22 @@ func buildCompiled(app App, opts compileOptions, priority string, positional []s
 	if err != nil {
 		return compileResult{}, err
 	}
+	// output 指令只在 apply 成功后落盘；这里先从 DSL 读出路径（解析失败时交给下面的 Compiler 报错）。
+	var outputPath string
+	if file, parseErrs := parser.Parse(source, src); len(parseErrs) == 0 {
+		outputPath = file.Output
+	}
 	ruleset, warns, compileErr := app.Compiler(src, Options{
-		Table:     opts.table,
-		Chain:     opts.chain,
-		Hook:      strings.ToLower(opts.hook),
-		Priority:  priority,
-		LogPrefix: opts.logPrefix,
-		Version:   app.Version,
-		Source:    source,
-		Stamp:     opts.stamp,
-		Now:       time.Now(),
+		Table:       opts.table,
+		Chain:       opts.chain,
+		Hook:        strings.ToLower(opts.hook),
+		Priority:    priority,
+		PrioritySet: opts.prioritySet,
+		LogPrefix:   opts.logPrefix,
+		Version:     app.Version,
+		Source:      source,
+		Stamp:       opts.stamp,
+		Now:         time.Now(),
 	})
 	if !opts.quiet {
 		for _, warn := range warns {
@@ -303,7 +305,7 @@ func buildCompiled(app App, opts compileOptions, priority string, positional []s
 	if compileErr != nil {
 		return compileResult{}, compileError(compileErr)
 	}
-	return compileResult{ruleset: ruleset, warns: warns}, nil
+	return compileResult{ruleset: ruleset, warns: warns, outputPath: outputPath}, nil
 }
 
 // compileError 把编译错误转换为退出码 1 的命令错误。
@@ -385,7 +387,54 @@ func applyAction(app App, cmd *cli.Command, positional []string, stdin io.Reader
 	if applyErr := app.Applier(result.ruleset, opts.table); applyErr != nil {
 		return &commandError{code: 2, lines: []string{applyErr.Error()}}
 	}
+	// output 指令：apply 成功后把同一份产物落盘，文件即「已生效规则」的快照。
+	// 失败时规则已经生效，错误信息必须说明这一点，避免运维误判为整体失败。
+	if result.outputPath != "" {
+		if outErr := writeOutputFile(result.outputPath, result.ruleset); outErr != nil {
+			return &commandError{code: 2, lines: []string{
+				errs.NewError("", 0, 0, errs.CategoryApply, errs.CodeApply,
+					"规则已生效，但写入 %s 失败：%v", result.outputPath, outErr).Format(),
+			}}
+		}
+	}
 	return nil
+}
+
+// writeOutputFile 把产物写到 output 指令指定的路径：自动创建父目录、原子覆盖、拒绝符号链接。
+//
+// 权限固定 0644（产物不含机密），父目录 0755。写入走同目录临时文件 + rename，
+// 避免 nft 读到半截文件；目标已是符号链接时直接拒绝，防止 ACL 被篡改后写到意外位置。
+func writeOutputFile(path string, data []byte) error {
+	if info, err := os.Lstat(path); err == nil {
+		if info.Mode()&os.ModeSymlink != 0 {
+			return fmt.Errorf("目标路径是符号链接")
+		}
+		if info.IsDir() {
+			return fmt.Errorf("目标路径是目录")
+		}
+	}
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return err
+	}
+	tmp, err := os.CreateTemp(dir, ".efw-output-*")
+	if err != nil {
+		return err
+	}
+	tmpName := tmp.Name()
+	defer os.Remove(tmpName) // rename 成功后是 no-op，失败时清理残留。
+	if _, err := tmp.Write(data); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Chmod(0o644); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	return os.Rename(tmpName, path)
 }
 
 func versionCommand(app App, stdout io.Writer) *cli.Command {
@@ -425,20 +474,19 @@ func checkOptions(table, chain, hook, priority, logPrefix string) (string, *errs
 		return "", errs.NewError("", 0, 0, errs.CategoryUsage, errs.CodeUsage,
 			"chain 名不能是 postrouting（与内置 NAT 链冲突）")
 	}
+	if strings.EqualFold(chain, "prerouting") {
+		return "", errs.NewError("", 0, 0, errs.CategoryUsage, errs.CodeUsage,
+			"chain 名不能是 prerouting（与内置目的 NAT 链冲突）")
+	}
 	if !strings.EqualFold(hook, "input") {
 		return "", errs.NewError("", 0, 0, errs.CategoryUsage, errs.CodeUsage,
 			"v1 仅支持 --hook input，得到 %q", hook)
 	}
 
-	normalized := priority
-	lower := strings.ToLower(priority)
-	if _, ok := priorityKeywords[lower]; ok {
-		normalized = lower
-	} else {
-		if _, err := strconv.ParseInt(priority, 10, 32); err != nil {
-			return "", errs.NewError("", 0, 0, errs.CategoryUsage, errs.CodeUsage,
-				"priority %q 不合法（raw|mangle|filter|security|dstnat|srcnat 或 32 位整数）", priority)
-		}
+	normalized, ok := ir.NormalizePriority(priority)
+	if !ok {
+		return "", errs.NewError("", 0, 0, errs.CategoryUsage, errs.CodeUsage,
+			"priority %q 不合法（raw|mangle|filter|security|dstnat|srcnat 或 32 位整数）", priority)
 	}
 
 	if logPrefix == "" {

@@ -3,7 +3,7 @@
 把一套面向 ACL 的 DSL 编译成**完整、可直接 `nft -f` 加载**的 nftables ruleset。
 
 - 默认纯离线编译；`efw apply` 编译后直接原子应用到内核，重复执行即覆盖。
-- 覆盖入站（`input`）与容器发布端口（`forward`，仅 DNAT 流量，Docker/Podman）；可选 `masquerade` 出站源 NAT（`postrouting`），按源地址/出接口匹配。`table inet` 双栈。
+- 覆盖入站（`input`）与容器发布端口（`forward`，仅 DNAT 流量，Docker/Podman）；可选 `dnat` 入站目的 NAT（`prerouting`：本机端口重定向 / 跨机端口转发）与 `masquerade` 出站源 NAT（`postrouting`）。`table inet` 双栈。
 - **默认零来源信任**：链首只放行 `iifname "lo"`；RFC1918、CGNAT、IPv4/IPv6 link-local、IPv6 ULA 都不隐式放行，内网/Tailscale/容器来源一律在 ACL 里显式写 `private`、网段或 `iface <网卡名>`（容器用 `iface br-*` / `iface docker0`，`apply` 不探测运行时网段）。IPv6 的 NDP/MLD/ICMPv6 错误与 DHCPv6 由 `v6-bootstrap` 兜底。
 
 设计细节、错误码与验收标准见本地 SPEC.md（不纳入版本库），本文只讲怎么用。
@@ -65,6 +65,7 @@ efw-nft08 apply rules.acl
 
 `rules.acl`：
 
+<!-- golden: 37_readme_quickstart（此块是 testdata/golden 用例的输入，改动需同步重生成） -->
 ```text
 # 公司出口白名单
 v6-bootstrap off
@@ -88,6 +89,7 @@ drop                     # 兜底：以上都不匹配的一律丢弃
 
 也可以让 ACL 文件自己可执行：带 `apply` 参数直接生效，不带则只输出产物。
 
+<!-- golden: 38_readme_shebang（此块是 testdata/golden 用例的输入，改动需同步重生成） -->
 ```text
 #!/usr/local/bin/efw apply
 
@@ -125,6 +127,8 @@ nft -f rules.nft      # 真正生效
 ```text
 established auto|off               # 默认 auto：链首放行已建立连接
 v6-bootstrap auto|off              # 默认 auto：兜底为 drop/reject 时放行 IPv6 NDP/MLD/ICMPv6 错误与 DHCPv6
+priority <关键字|整数>             # input/forward 链 priority（默认 -99；显式 --priority 优先）
+output <绝对路径.nft>              # apply 成功后把产物落盘（自动建父目录、原子覆盖；compile/-c 不写）
 
 accept { <规则> }                  # 块内省略 action，继承块动作（allow 是 accept 的别名）
 drop { <规则> }                    # 同上（reject 同理）
@@ -133,6 +137,7 @@ iface <name|prefix*> [log]         # 整卡规则：该入口网卡上的全部�
 private                            # 独立一行：私有源地址（RFC1918 + RFC4193 ULA）
 NAME { <IP|CIDR> ... }             # 命名集合：v4/v6 可混写，产物拆成 NAME_v4/NAME_v6（仅作源地址）
 masquerade { <出接口> | <源地址> -> <出接口> }   # 出站源 NAT（内核 ≥5.2）
+dnat { <匹配> -> <端口|地址:端口> }              # 入站目的 NAT：本机重定向 / 跨机端口转发（内核 ≥5.2）
 # <规则> = [proto] src [proto] -> [dst] [port]    # proto 可出现在匹配部分任意位置
 ```
 
@@ -174,6 +179,57 @@ masquerade {
 
 NAT 只做地址转换，不负责放行转发流量：需要 `ip_forward=1` 且 FORWARD 策略允许。出接口必须是网卡名；`private` 可作源地址。详见 [DSL 参考](guide/dsl.md)。
 
+## 入站目的 NAT（dnat）
+
+`dnat` 块生成 `prerouting` 链（priority `dstnat + 1`），用于入站端口重定向与跨机端口转发：
+
+```text
+# 端口汇聚：eth0 上进来的 UDP 20000-50000 全部转到本机 443
+dnat {
+    iface eth0 udp 20000-50000 -> 443
+}
+
+# 重定向之后包变成「到本机」，走 input 链，必须显式放行目标端口
+accept {
+    udp * -> 443
+}
+
+drop
+```
+
+跨机端口转发（等价 iptables 的 DNAT）：
+
+```text
+dnat {
+    iface eth0 tcp 8080 -> 10.0.0.5:8080       # 改目的地址 + 端口
+    iface eth0 tcp 8443 -> [2001:db8::5]:8443
+    iface eth0 tcp 9090 -> 10.0.0.6            # 只改地址，端口保持 9090
+}
+```
+
+- 条目语法是 `<匹配> -> <目标>`：`->` 左边是匹配条件（`iface` / 协议 / 源地址 / 目的端口，顺序不限），右边是 NAT 目标。dnat 块内 `iface` 可以和其它条件组合，源地址可省略；**不支持按原目的地址匹配**（需要时再引入 `daddr` 关键字）。
+- `->` 右侧只写端口 = **本机重定向**（nft `redirect`，等价 iptables `REDIRECT`）；写地址 = **跨机转发**（nft `dnat ip`/`dnat ip6`，等价 iptables `DNAT`）。
+- 目标单端口支持多对一（范围 → 443）；目标写范围时必须与匹配范围等长（`udp 5000-5100 -> 6000-6100`），否则报 E102。
+- **重定向后必须放行目标端口**：默认零信任下没写 `accept` 会被兜底丢弃。编译期会检查，缺放行时给 `W5` 告警。
+- 严格按书写顺序生成，NAT 首条匹配生效；不参与兜底与优化。文件仍需满足「最后一条匹配一切」。
+- prerouting 链排在 iptables/Docker 的 `dstnat`(-100) 之后，不抢容器已发布端口；需要内核 ≥ 5.2，`efw-nft08` 直接报 E102。
+- `redirect` 会改写目的地址：服务若需要原目的端口，UDP 侧要用 `IP_RECVORIGDSTADDR` 取回；透明代理场景应评估 TPROXY 而非 dnat。
+
+## output 落盘（apply）
+
+ACL 文件头写 `output /etc/nftables.d/efw.nft` 后，`apply` 会把同一份产物也写到该文件：路径必须是绝对路径且以 `.nft` 结尾，自动创建父目录，同目录临时文件 + rename 原子覆盖（`0644`）。`compile` 与 `-c` 只编译/检查，不写这个文件。
+
+**顺序是先应用规则、成功后再写文件**，所以文件始终是「当前已生效规则」的快照：
+
+| 场景 | 内核 | output 文件 | 退出码 |
+|:--|:--|:--|:--|
+| 编译失败 | 未触碰 | 不写，保留旧文件 | 1 |
+| `nft -c` 校验失败 | 旧表不变 | 不写 | 2 |
+| `nft -f` 应用失败 | 旧表不变（批次原子） | 不写，旧文件仍在 | 2 |
+| 应用成功、写文件失败 | 新规则已生效 | 旧文件未更新 | 2（提示「规则已生效」） |
+
+反过来先写文件的风险：apply 失败时会留下与内核不一致的文件，而该文件常被 `nftables.service` 在开机时 `include`，下次重启会把一份从未成功应用过的规则带上线。
+
 ## 容器访问宿主机（按需放行）
 
 efw **不默认信任容器**，也不探测 Docker/Podman 网段；容器访问宿主（含访问宿主发布端口）需要在 ACL 里按**入口网桥**显式放行。
@@ -200,7 +256,7 @@ drop
 ```
 
 - 网桥名以 `ip -br link` 为准，只写机器上真实存在的网桥。
-- `iface` 匹配该网桥上的**全部**流量（不是按端口），且不能与源/端口组合。
+- `iface` 匹配该网桥上的**全部**流量（不是按端口），且不能与源/端口组合（`dnat` 块例外，见上）。
 - forward 侧会自动生成 `ct status dnat iifname "<网桥>"`，容器访问宿主发布端口的 hairpin 也覆盖。
 - rootless Podman（pasta/slirp4netns）没有宿主侧网桥/DNAT，容器访问宿主时源地址是宿主/loopback，一般不需要 `iface` 规则；被拦时按具体地址/端口放行。
 - 只想放行部分容器时不能用 `iface`（整桥生效），需按容器源地址/网段写规则，并自行维护地址变化。
@@ -235,11 +291,12 @@ accept {
 - 如需整卡放行/拒绝，用独立规则 `iface <网卡名>`（支持尾缀 `*`，不能与源/端口组合）。
 - IPv6 基础流量（NDP、MLD、ICMPv6 错误含 PMTUD）与 DHCPv6 由 `v6-bootstrap auto` 在兜底为 `drop`/`reject` 时自动放行；`v6-bootstrap off` 时要自己保证这些类型可达，否则 IPv6 邻居解析与大包传输会断。
 - `masquerade` 只做源 NAT，不改变 FORWARD 过滤：转发是否放行取决于 `ip_forward` 与主机 FORWARD 策略（efw 的 `forward` 链只处理 DNAT 流量）。
+- `dnat` 的本机重定向（`redirect`）会改写目的地址：目标端口必须在 `input` 链显式放行（缺放行有 W5 告警）；服务需要原目的信息时用 `IP_RECVORIGDSTADDR`。跨机 DNAT 的转发放行落在 `forward` 链。
 - 显式放行的来源仍可能被伪造；`rp_filter=0` 时建议开启反向路径过滤。
 - 完整语义、apply 流程与容器发布端口见 [部署说明](guide/deploy.md)。
 
 ## 文档
 
-- [DSL 参考](guide/dsl.md)：语法、简写、动作块与边界
+- [DSL 参考](guide/dsl.md)：语法、简写、动作块、入站/出站 NAT 与边界
 - [部署说明](guide/deploy.md)：部署参数、apply、内网/Tailscale 显式放行、容器 forward
 - [开发与发布](guide/development.md)：Actions 发布流程、测试、v1 不做

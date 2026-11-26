@@ -33,14 +33,15 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 // compile 使用 nft 0.8 方言编译：数字 priority、拆分 th dport、禁用 masquerade。
 func compile(src []byte, opts efwcli.Options) ([]byte, []errs.Warning, error) {
 	return legacy.Compile(src, legacy.Options{
-		Table:     opts.Table,
-		Chain:     opts.Chain,
-		Hook:      opts.Hook,
-		Priority:  opts.Priority,
-		LogPrefix: opts.LogPrefix,
-		Version:   opts.Version,
-		Source:    opts.Source,
-		Stamp:     opts.Stamp,
-		Now:       opts.Now,
+		Table:       opts.Table,
+		Chain:       opts.Chain,
+		Hook:        opts.Hook,
+		Priority:    opts.Priority,
+		PrioritySet: opts.PrioritySet,
+		LogPrefix:   opts.LogPrefix,
+		Version:     opts.Version,
+		Source:      opts.Source,
+		Stamp:       opts.Stamp,
+		Now:         opts.Now,
 	})
 }

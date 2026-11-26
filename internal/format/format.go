@@ -22,6 +22,7 @@ var blockKeywords = map[string]struct{}{
 	"drop":       {},
 	"reject":     {},
 	"masquerade": {},
+	"dnat":       {},
 }
 
 // Source 返回格式化后的 DSL 文本，输出以单个换行结束。

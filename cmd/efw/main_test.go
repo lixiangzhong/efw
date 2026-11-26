@@ -32,6 +32,7 @@ func TestRun(t *testing.T) {
 		{name: "文件不存在", args: []string{"compile", "/nonexistent/efw.acl"}, wantExit: 2, wantStderr: "E103"},
 		{name: "非法 hook", args: []string{"compile", "--hook", "forward"}, stdin: validACL, wantExit: 2, wantStderr: "E103"},
 		{name: "chain 为 postrouting", args: []string{"compile", "--chain", "postrouting"}, stdin: validACL, wantExit: 2, wantStderr: "E103"},
+		{name: "chain 为 prerouting", args: []string{"compile", "--chain", "prerouting"}, stdin: validACL, wantExit: 2, wantStderr: "E103"},
 		{name: "非法 priority", args: []string{"compile", "--priority", "not-a-priority"}, stdin: validACL, wantExit: 2, wantStderr: "E103"},
 		{name: "-o 空路径", args: []string{"compile", "-o", ""}, stdin: validACL, wantExit: 2, wantStderr: "E103"},
 		{name: "未知 flag", args: []string{"compile", "--bogus"}, stdin: validACL, wantExit: 2, wantStderr: "E103"},
@@ -52,7 +53,7 @@ func TestRun(t *testing.T) {
 			args:       []string{"compile"},
 			stdin:      "v6-bootstrap off\naccept { 1.1.1.1 -> 80 }\ndrop { * }\n",
 			wantExit:   0,
-			wantStdout: "priority filter;",
+			wantStdout: "priority -99;",
 		},
 	}
 
@@ -183,5 +184,34 @@ func TestRunFileFlag(t *testing.T) {
 				t.Fatalf("stderr 缺少 %q\n实际:\n%s", tc.wantStderr, stderr.String())
 			}
 		})
+	}
+}
+
+// TestPriorityDirectiveCLI 验证 ACL 的 priority 指令同时作用于 input/forward，
+// 且显式 --priority 覆盖它。
+func TestPriorityDirectiveCLI(t *testing.T) {
+	const src = "priority 10\nv6-bootstrap off\naccept { 1.1.1.1 }\ndrop { * }\n"
+
+	compileWith := func(args []string) string {
+		t.Helper()
+		var stdout, stderr bytes.Buffer
+		if exit := run(args, strings.NewReader(src), &stdout, &stderr); exit != 0 {
+			t.Fatalf("%v: exit=%d stderr:\n%s", args, exit, stderr.String())
+		}
+		return stdout.String()
+	}
+
+	text := compileWith([]string{"compile"})
+	for _, want := range []string{"hook input priority 10;", "hook forward priority 10;"} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("缺少 %q:\n%s", want, text)
+		}
+	}
+
+	text = compileWith([]string{"compile", "--priority", "0"})
+	for _, want := range []string{"hook input priority 0;", "hook forward priority 0;"} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("显式 --priority 应覆盖 ACL：缺少 %q:\n%s", want, text)
+		}
 	}
 }

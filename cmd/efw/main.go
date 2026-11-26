@@ -32,14 +32,15 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 // compile 使用现代 nft（≥1.0）方言编译。
 func compile(src []byte, opts efwcli.Options) ([]byte, []errs.Warning, error) {
 	return compiler.Compile(src, compiler.Options{
-		Table:     opts.Table,
-		Chain:     opts.Chain,
-		Hook:      opts.Hook,
-		Priority:  opts.Priority,
-		LogPrefix: opts.LogPrefix,
-		Version:   opts.Version,
-		Source:    opts.Source,
-		Stamp:     opts.Stamp,
-		Now:       opts.Now,
+		Table:       opts.Table,
+		Chain:       opts.Chain,
+		Hook:        opts.Hook,
+		Priority:    opts.Priority,
+		PrioritySet: opts.PrioritySet,
+		LogPrefix:   opts.LogPrefix,
+		Version:     opts.Version,
+		Source:      opts.Source,
+		Stamp:       opts.Stamp,
+		Now:         opts.Now,
 	})
 }

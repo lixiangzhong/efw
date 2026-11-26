@@ -17,9 +17,9 @@ const (
 	indentSetField = "        "
 	indentChain    = "        "
 
-	// forwardChainName/forwardPriority：内置容器转发链（仅匹配 DNAT 流量）。
+	// forwardChainName：内置容器转发链（仅匹配 DNAT 流量）。
+	// priority 与 input 链共用生效值，由 ACL 的 priority 指令或 --priority 决定。
 	forwardChainName = "forward"
-	forwardPriority  = "-10"
 
 	// masqueradeChainName/masqueradePriority：出站源 NAT 链。
 	// 90 先于 Docker/Netavark/Tailscale 的 srcnat(100)，显式规则优先；
@@ -60,15 +60,17 @@ func renderPriority(priority string) string {
 
 // Options 是产物头的元信息与部署参数。
 type Options struct {
-	Table     string
-	Chain     string
-	Hook      string
-	Priority  string
-	LogPrefix string
-	Version   string
-	Source    string
-	Stamp     bool
-	Now       time.Time
+	Table    string
+	Chain    string
+	Hook     string
+	Priority string
+	// PrioritySet 报告 Priority 是否由命令行显式指定；true 时覆盖 ACL 的 priority 指令。
+	PrioritySet bool
+	LogPrefix   string
+	Version     string
+	Source      string
+	Stamp       bool
+	Now         time.Time
 	// UnreachableLines 是 W1 告警涉及的行号，产物中会加 unreachable 注释。
 	UnreachableLines map[int]bool
 }
@@ -105,7 +107,7 @@ func Render(f *ir.File, plan optimize.Plan, opts Options) []byte {
 	renderChain(&b, f, plan, opts, opts.Chain, opts.Hook, opts.Priority, false)
 	if f.Forward {
 		b.WriteString("\n")
-		renderChain(&b, f, plan, opts, forwardChainName, "forward", forwardPriority, true)
+		renderChain(&b, f, plan, opts, forwardChainName, "forward", opts.Priority, true)
 	}
 	if len(f.Masquerades) > 0 {
 		b.WriteString("\n")

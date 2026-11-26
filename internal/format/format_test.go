@@ -109,6 +109,11 @@ var formatCases = []formatCase{
 		want: "masquerade { eth0 }\nmasquerade {\n    * -> eth1\n    10.0.0.0/8 -> eth2\n    private -> eth3\n}\naccept { 1.1.1.1 -> 22 }\ndrop\n",
 	},
 	{
+		name: "dnat 块与 to 间距",
+		in:   "dnat{\niface eth0 udp 20000-50000->443\ntcp 8080\t->\t10.0.0.5:8080\n}\naccept{\nudp *->443\n}\ndrop\n",
+		want: "dnat {\n    iface eth0 udp 20000-50000 -> 443\n    tcp 8080 -> 10.0.0.5:8080\n}\naccept {\n    udp * -> 443\n}\ndrop\n",
+	},
+	{
 		name: "混合换行与无末尾换行",
 		in:   "accept{\r\n1.1.1.1 -> 80\n}\r\ndrop",
 		want: "accept {\n    1.1.1.1 -> 80\n}\ndrop\n",
@@ -241,6 +246,11 @@ func withoutPositions(f *ir.File) *ir.File {
 	for i := range out.Masquerades {
 		out.Masquerades[i].Line = 0
 		out.Masquerades[i].Raw = ""
+	}
+	out.Dnats = append([]ir.Dnat(nil), f.Dnats...)
+	for i := range out.Dnats {
+		out.Dnats[i].Line = 0
+		out.Dnats[i].Raw = ""
 	}
 	return &out
 }

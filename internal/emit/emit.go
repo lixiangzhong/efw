@@ -17,9 +17,15 @@ const (
 	indentSetField = "        "
 	indentChain    = "        "
 
-	// forwardChainName/forwardPriority：内置容器转发链（仅匹配 DNAT 流量）。
+	// forwardChainName：内置容器转发链（仅匹配 DNAT 流量）。
+	// priority 与 input 链共用生效值，由 ACL 的 priority 指令或 --priority 决定。
 	forwardChainName = "forward"
-	forwardPriority  = "-10"
+
+	// dnatChainName/dnatPriority：入站目的 NAT 链。
+	// dstnat + 1（= -99）排在 iptables/Docker 的标准 dstnat(-100) 之后，不抢容器
+	// 已发布的端口；同 hook 同 priority 时跨表顺序不保证，必须这样错开。
+	dnatChainName = "prerouting"
+	dnatPriority  = "dstnat + 1"
 
 	// masqueradeChainName/masqueradePriority：出站源 NAT 链。
 	// 90 先于 Docker/Netavark/Tailscale 的 srcnat(100)，显式规则优先；
@@ -84,10 +90,15 @@ func Render(f *ir.File, plan optimize.Plan, opts Options) []byte {
 		renderSet(&b, set)
 	}
 
+	if len(f.Dnats) > 0 {
+		renderDnatChain(&b, f.Dnats)
+		b.WriteString("\n")
+	}
+
 	renderChain(&b, f, plan, opts, opts.Chain, opts.Hook, opts.Priority, false)
 	if f.Forward {
 		b.WriteString("\n")
-		renderChain(&b, f, plan, opts, forwardChainName, "forward", forwardPriority, true)
+		renderChain(&b, f, plan, opts, forwardChainName, "forward", opts.Priority, true)
 	}
 	if len(f.Masquerades) > 0 {
 		b.WriteString("\n")
@@ -137,6 +148,138 @@ func renderSet(b *strings.Builder, set optimize.Set) {
 	fmt.Fprintf(b, "%sflags interval\n", indentSetField)
 	fmt.Fprintf(b, "%selements = { %s }\n", indentSetField, strings.Join(set.Elements, ", "))
 	fmt.Fprintf(b, "%s}\n\n", indentSet)
+}
+
+// renderDnatChain 渲染入站目的 NAT 链（prerouting/dstnat）。
+// 条目顺序必须与书写顺序一致：NAT 首条匹配生效，不去重/不重排。
+func renderDnatChain(b *strings.Builder, entries []ir.Dnat) {
+	fmt.Fprintf(b, "%schain %s {\n", indentSet, dnatChainName)
+	fmt.Fprintf(b, "%stype nat hook prerouting priority %s; policy accept;\n\n", indentChain, dnatPriority)
+	fmt.Fprintf(b, "%s# 说明: 入站目的 NAT；首条匹配生效，顺序即书写顺序\n", indentChain)
+	for i, entry := range entries {
+		if i > 0 {
+			b.WriteString("\n")
+		}
+		fmt.Fprintf(b, "%s# %d: %s\n", indentChain, entry.Line, commentText(strings.TrimSpace(entry.Raw)))
+		fmt.Fprintf(b, "%s%s\n", indentChain, dnatText(entry))
+	}
+	fmt.Fprintf(b, "%s}\n", indentSet)
+}
+
+// dnatText 返回一条目的 NAT 规则的产物文本。
+//
+// 匹配侧的源/目的地址按各自地址族加 ip/ip6 前缀；跨机目标用 dnat ip|ip6（inet 族
+// NAT 必须显式地址族），本机目标用 redirect（只改端口）。跨机目标钉死单族而匹配侧
+// 完全没有族信息时补 meta nfproto，避免另一族的流量被拉进规则。
+func dnatText(entry ir.Dnat) string {
+	parts := make([]string, 0, 8)
+	if entry.Iface != "" {
+		parts = append(parts, ifaceExpr(entry.Iface))
+	}
+	if !entry.Src.Any {
+		parts = append(parts, dnatAddrExpr("saddr", entry.Src))
+	}
+	if family := dnatImplicitFamily(entry); family != "" {
+		parts = append(parts, "meta nfproto "+family)
+	}
+	parts = append(parts, dnatProtoExpr(entry)...)
+	parts = append(parts, dnatTargetExpr(entry.Target))
+	return strings.Join(parts, " ")
+}
+
+// dnatImplicitFamily 返回需要补充的 nfproto 限定：只有跨机目标才可能缺失族信息。
+func dnatImplicitFamily(entry ir.Dnat) string {
+	if entry.Target.Local || entry.Src.HasFamily() {
+		return ""
+	}
+	if entry.Proto.Family() != ir.FamilyAny {
+		return ""
+	}
+	if entry.Target.Addr.Family == ir.FamilyIPv6 {
+		return "ipv6"
+	}
+	return "ipv4"
+}
+
+// dnatAddrExpr 生成目的 NAT 规则里的地址匹配。
+func dnatAddrExpr(direction string, addr ir.Addr) string {
+	family := "ip"
+	if addr.Family == ir.FamilyIPv6 {
+		family = "ip6"
+	}
+	return fmt.Sprintf("%s %s %s", family, direction, addr.Value)
+}
+
+// dnatProtoExpr 生成协议/端口匹配。nft 的 nat 链里协议省略 + 端口用 th dport 有效。
+func dnatProtoExpr(entry ir.Dnat) []string {
+	switch entry.Proto {
+	case ir.ProtoTCP:
+		if entry.Ports.IsAny() {
+			return []string{"meta l4proto tcp"}
+		}
+		return []string{"tcp dport", portSetText(entry.Ports)}
+	case ir.ProtoUDP:
+		if entry.Ports.IsAny() {
+			return []string{"meta l4proto udp"}
+		}
+		return []string{"udp dport", portSetText(entry.Ports)}
+	case ir.ProtoICMP:
+		return []string{"meta l4proto { icmp, ipv6-icmp }"}
+	case ir.ProtoTCP4:
+		return dnatFamilyProtoExpr("ipv4", "tcp", entry.Ports)
+	case ir.ProtoTCP6:
+		return dnatFamilyProtoExpr("ipv6", "tcp", entry.Ports)
+	case ir.ProtoUDP4:
+		return dnatFamilyProtoExpr("ipv4", "udp", entry.Ports)
+	case ir.ProtoUDP6:
+		return dnatFamilyProtoExpr("ipv6", "udp", entry.Ports)
+	case ir.ProtoICMP4:
+		return []string{"meta nfproto ipv4 meta l4proto icmp"}
+	case ir.ProtoICMP6:
+		return []string{"meta nfproto ipv6 meta l4proto ipv6-icmp"}
+	default:
+		if entry.Ports.IsAny() {
+			return nil
+		}
+		return []string{"meta l4proto { tcp, udp } th dport", portSetText(entry.Ports)}
+	}
+}
+
+func dnatFamilyProtoExpr(nfproto, proto string, ports ir.PortSet) []string {
+	parts := []string{"meta nfproto " + nfproto}
+	if ports.IsAny() {
+		return append(parts, "meta l4proto "+proto)
+	}
+	return append(parts, proto+" dport", portSetText(ports))
+}
+
+// dnatTargetExpr 生成 NAT 目标：本机用 redirect（只改端口），跨机用 dnat ip|ip6。
+func dnatTargetExpr(target ir.DnatTarget) string {
+	if target.Local {
+		return "redirect to :" + portSetText(target.Ports)
+	}
+	if target.Addr.Family == ir.FamilyIPv6 {
+		if target.Ports.IsAny() {
+			return fmt.Sprintf("dnat ip6 to %s", target.Addr.Value)
+		}
+		return fmt.Sprintf("dnat ip6 to [%s]:%s", target.Addr.Value, portSetText(target.Ports))
+	}
+	if target.Ports.IsAny() {
+		return fmt.Sprintf("dnat ip to %s", target.Addr.Value)
+	}
+	return fmt.Sprintf("dnat ip to %s:%s", target.Addr.Value, portSetText(target.Ports))
+}
+
+// portSetText 渲染 ir 端口集合：单区间不带括号，多区间用 { ... }。
+func portSetText(p ir.PortSet) string {
+	if len(p.Ranges) == 1 {
+		return p.Ranges[0].String()
+	}
+	items := make([]string, len(p.Ranges))
+	for i, r := range p.Ranges {
+		items[i] = r.String()
+	}
+	return "{ " + strings.Join(items, ", ") + " }"
 }
 
 // renderMasqueradeChain 渲染出站源 NAT 链；NAT 首条匹配生效，条目顺序必须与书写顺序一致。

@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/lixiangzhong/efw/internal/compiler"
+	"github.com/lixiangzhong/efw/internal/ir"
 )
 
 // goldenDir 是黄金文件目录（相对本包路径）。
@@ -18,7 +19,7 @@ func testOptions(source string) compiler.Options {
 		Table:     "efw",
 		Chain:     "input",
 		Hook:      "input",
-		Priority:  "filter",
+		Priority:  ir.PriorityDefault,
 		LogPrefix: "efw: ",
 		Version:   compiler.Version,
 		Source:    source,

@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/lixiangzhong/efw/internal/compiler"
+	"github.com/lixiangzhong/efw/internal/ir"
 	"github.com/lixiangzhong/efw/internal/legacy"
 )
 
@@ -21,7 +22,7 @@ func testOptions(source string) legacy.Options {
 		Table:     "efw",
 		Chain:     "input",
 		Hook:      "input",
-		Priority:  "filter",
+		Priority:  ir.PriorityDefault,
 		LogPrefix: "efw: ",
 		Version:   compiler.Version,
 		Source:    source,
@@ -40,8 +41,11 @@ func TestGoldenNft08(t *testing.T) {
 
 	for _, aclPath := range inputs {
 		name := strings.TrimSuffix(filepath.Base(aclPath), ".acl")
-		if name == "35_masquerade" {
+		switch name {
+		case "35_masquerade":
 			continue // nft 0.8 不支持 masquerade，由 TestMasqueradeRejected 覆盖
+		case "39_dnat":
+			continue // nft 0.8 不支持 dnat/redirect，由 TestDnatRejected 覆盖
 		}
 		t.Run(name, func(t *testing.T) {
 			src, err := os.ReadFile(aclPath)

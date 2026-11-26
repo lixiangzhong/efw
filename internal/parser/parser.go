@@ -9,6 +9,7 @@ import (
 	"bytes"
 	"fmt"
 	"net/netip"
+	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
@@ -42,14 +43,17 @@ var directiveNames = map[string]struct{}{
 	"established":  {},
 	"v6-bootstrap": {},
 	"forward":      {},
+	"priority":     {},
+	"output":       {},
 }
 
-// blockKind 区分动作块、masquerade（出站 NAT）块与命名集合块。
+// blockKind 区分动作块、masquerade（出站源 NAT）、dnat（入站目的 NAT）块与命名集合块。
 type blockKind uint8
 
 const (
 	blockVerdict blockKind = iota
 	blockMasquerade
+	blockDnat
 	blockSet
 )
 
@@ -82,6 +86,8 @@ type parser struct {
 	estSet       bool
 	v6Set        bool
 	forwardSet   bool
+	prioritySet  bool
+	outputSet    bool
 	rulesStarted bool
 	block        *blockCtx
 }
@@ -122,6 +128,15 @@ func (p *parser) parseLine(lineNo int, rawLine string) {
 		p.openMasqueradeBlock(lineNo)
 		return
 	}
+	// dnat 是独立块：可单行 `dnat { ... }`，也可分行。
+	if content, ok := inlineDnat(text); ok {
+		p.parseInlineDnat(lineNo, rawLine, content)
+		return
+	}
+	if isDnatHeader(text) {
+		p.openDnatBlock(lineNo)
+		return
+	}
 	if verdict, content, ok := inlineBlock(text); ok {
 		p.parseInlineBlock(lineNo, rawLine, verdict, content)
 		return
@@ -149,13 +164,15 @@ func (p *parser) parseLine(lineNo int, rawLine string) {
 		return
 	}
 	if strings.HasSuffix(text, "{") {
-		p.syntaxErr(lineNo, "块头格式错误（应为 "+verdictWordList+" {、masquerade { 或命名集合 `NAME {`）或花括号未闭合")
+		p.syntaxErr(lineNo, "块头格式错误（应为 "+verdictWordList+" {、masquerade {、dnat { 或命名集合 `NAME {`）或花括号未闭合")
 		return
 	}
 	if p.block != nil {
 		switch p.block.kind {
 		case blockMasquerade:
 			p.parseMasqueradeEntry(lineNo, rawLine, text)
+		case blockDnat:
+			p.parseDnatEntry(lineNo, rawLine, text)
 		case blockSet:
 			p.parseSetElements(lineNo, text)
 		default:
@@ -247,6 +264,56 @@ func (p *parser) openMasqueradeBlock(lineNo int) {
 	}
 	p.rulesStarted = true
 	p.block = &blockCtx{kind: blockMasquerade, line: lineNo}
+}
+
+// inlineDnat 识别单行 dnat 块：`dnat { <条目> }`。
+func inlineDnat(text string) (string, bool) {
+	if !strings.HasSuffix(text, "}") {
+		return "", false
+	}
+	idx := strings.IndexByte(text, '{')
+	if idx < 0 {
+		return "", false
+	}
+	if !strings.EqualFold(strings.TrimSpace(text[:idx]), "dnat") {
+		return "", false
+	}
+	return strings.TrimSpace(text[idx+1 : len(text)-1]), true
+}
+
+// isDnatHeader 识别块头 `dnat {`（关键字大小写不敏感）。
+func isDnatHeader(text string) bool {
+	if !strings.HasSuffix(text, "{") {
+		return false
+	}
+	name := strings.TrimSpace(strings.TrimSuffix(text, "{"))
+	return strings.EqualFold(name, "dnat")
+}
+
+// parseInlineDnat 解析单行 dnat 块；内容按一条 NAT 规则处理。
+func (p *parser) parseInlineDnat(lineNo int, rawLine, content string) {
+	if p.block != nil {
+		p.syntaxErr(lineNo, "dnat 不能嵌套在其他块内")
+		return
+	}
+	if content == "" {
+		p.syntaxErr(lineNo, "dnat 块内至少需要一条规则")
+		return
+	}
+	p.rulesStarted = true
+	p.block = &blockCtx{kind: blockDnat, line: lineNo}
+	p.parseDnatEntry(lineNo, rawLine, content)
+	p.block = nil
+}
+
+// openDnatBlock 打开分行 dnat 块。
+func (p *parser) openDnatBlock(lineNo int) {
+	if p.block != nil {
+		p.syntaxErr(lineNo, "dnat 不能嵌套在其他块内")
+		return
+	}
+	p.rulesStarted = true
+	p.block = &blockCtx{kind: blockDnat, line: lineNo}
 }
 
 // blockHeaderVerdict 判断一行是否是块头（accept/allow/drop/reject {），返回块动作。
@@ -357,9 +424,12 @@ func (p *parser) closeBlock(lineNo int) {
 		return
 	}
 	if p.block.rules == 0 {
-		if p.block.kind == blockMasquerade {
+		switch p.block.kind {
+		case blockMasquerade:
 			p.syntaxErr(p.block.line, "masquerade 块内至少需要一条规则")
-		} else {
+		case blockDnat:
+			p.syntaxErr(p.block.line, "dnat 块内至少需要一条规则")
+		default:
 			p.syntaxErr(p.block.line, "块内至少需要一条规则")
 		}
 	}
@@ -397,6 +467,8 @@ func (p *parser) parseTopLine(lineNo int, rawLine, text string) {
 		p.syntaxErr(lineNo, "iface 规则必须写在动作块内（如 accept { iface eth0 }）")
 	case first == "masquerade":
 		p.syntaxErr(lineNo, "masquerade 是独立块，块头写成 `masquerade {`（单行可写 `masquerade { eth1 }`）")
+	case first == "dnat":
+		p.syntaxErr(lineNo, "dnat 是独立块，块头写成 `dnat {`（单行可写 `dnat { ... to 443 }`）")
 	default:
 		p.syntaxErr(lineNo, "规则必须写在动作块内（如 accept { ... } / drop { ... } / reject { ... }；allow 是 accept 的别名）")
 	}
@@ -473,7 +545,46 @@ func (p *parser) parseDirective(lineNo int, fields []string) {
 		}
 		p.file.Forward = v
 		p.forwardSet = true
+	case "priority":
+		if p.prioritySet {
+			p.directiveErr(lineNo, "priority 指令重复")
+			return
+		}
+		v, ok := ir.NormalizePriority(fields[1])
+		if !ok {
+			p.semanticErr(lineNo, "priority 只接受 nft 关键字（raw|mangle|filter|security|dstnat|srcnat）或 32 位整数，得到 %q", fields[1])
+			return
+		}
+		p.file.Priority = v
+		p.prioritySet = true
+	case "output":
+		if p.outputSet {
+			p.directiveErr(lineNo, "output 指令重复")
+			return
+		}
+		v, ok := normalizeOutputPath(fields[1])
+		if !ok {
+			p.semanticErr(lineNo, "output 只接受以 .nft 结尾的绝对路径，得到 %q", fields[1])
+			return
+		}
+		p.file.Output = v
+		p.outputSet = true
 	}
+}
+
+// normalizeOutputPath 校验 output 指令的落盘路径：必须是绝对路径且以 .nft 结尾，
+// 返回 Clean 后的路径；ok=false 表示非法。
+//
+// 绝对路径 + .nft 后缀是安全边界：ACL 来自版本库时也要防止被篡改成写任意 root 文件。
+func normalizeOutputPath(raw string) (string, bool) {
+	if !filepath.IsAbs(raw) {
+		return "", false
+	}
+	cleaned := filepath.Clean(raw)
+	if !strings.HasSuffix(strings.ToLower(cleaned), ".nft") {
+		return "", false
+	}
+	return cleaned, true
 }
 
 // ruleParts 是一条规则解析完成的中间结果。
@@ -603,6 +714,10 @@ func (p *parser) parseBlockRule(lineNo int, rawLine, text string) {
 	}
 	if first == "masquerade" {
 		p.syntaxErr(lineNo, "masquerade 是独立块，不能写在动作块内")
+		return
+	}
+	if first == "dnat" {
+		p.syntaxErr(lineNo, "dnat 是独立块，不能写在动作块内")
 		return
 	}
 	if first == ir.PrivateName {
@@ -834,6 +949,221 @@ func isMasqueradeReservedWord(raw string) bool {
 	}
 }
 
+// parseDnatEntry 解析 dnat 块内的一行，并追加到 File.Dnats。
+func (p *parser) parseDnatEntry(lineNo int, rawLine, text string) {
+	if strings.HasSuffix(text, "{") {
+		p.syntaxErr(lineNo, "dnat 块内不支持嵌套块")
+		return
+	}
+	entry, ok := p.parseDnat(lineNo, rawLine, text)
+	if !ok {
+		return
+	}
+	p.file.Dnats = append(p.file.Dnats, entry)
+	p.block.rules++
+}
+
+// parseDnat 解析一条入站目的 NAT 规则：
+//
+//	<匹配部分> -> <目标>
+//
+// 匹配部分写 iface / 协议 / 源地址 / 目的端口（与动作块无箭头写法一致），
+// `->` 右侧是 NAT 目标：只写端口表示改到本机（nft redirect，等价 iptables REDIRECT）：
+//
+//	iface eth0 udp 20000-50000 -> 443
+//
+// 目标带地址表示跨机 DNAT；只写地址则保留原端口：
+//
+//	iface eth0 tcp 8080 -> 10.0.0.5:8080
+//	iface eth0 tcp 8080 -> 10.0.0.5
+func (p *parser) parseDnat(lineNo int, rawLine, text string) (ir.Dnat, bool) {
+	entry := ir.Dnat{Line: lineNo, Raw: rawLine}
+
+	arrow := strings.Index(text, "->")
+	if arrow < 0 {
+		p.syntaxErr(lineNo, "dnat 条目缺少 ->（如 `iface eth0 udp 20000-50000 -> 443`）")
+		return entry, false
+	}
+	if strings.Contains(text[arrow+2:], "->") {
+		p.syntaxErr(lineNo, "dnat 条目只能有一个 ->")
+		return entry, false
+	}
+	matchText := strings.TrimSpace(text[:arrow])
+	targetText := strings.TrimSpace(text[arrow+2:])
+	if matchText == "" {
+		p.syntaxErr(lineNo, "-> 左侧缺少匹配部分（iface / 协议 / 源地址 / 目的端口）")
+		return entry, false
+	}
+	if targetText == "" {
+		p.syntaxErr(lineNo, "-> 右侧缺少 NAT 目标（本机写端口 443；跨机写 10.0.0.5:8080）")
+		return entry, false
+	}
+
+	iface, src, proto, ports, ok := p.parseDnatMatch(lineNo, matchText)
+	if !ok {
+		return entry, false
+	}
+	target, ok := p.parseDnatTarget(lineNo, targetText)
+	if !ok {
+		return entry, false
+	}
+	entry.Iface = iface
+	entry.Src = src
+	entry.Proto = proto
+	entry.Ports = ports
+	entry.Target = target
+	return entry, true
+}
+
+// parseDnatMatch 解析 -> 左侧的匹配部分：iface / 协议 / 源地址 / 目的端口。
+//
+// 与动作块规则不同，-> 右侧被 NAT 目标占用，左侧没有「目的地址」的位置：
+// 地址 token 一律视为源地址（与动作块 `1.1.1.1 -> 80` 的左侧语义一致）。
+func (p *parser) parseDnatMatch(lineNo int, text string) (string, ir.Addr, ir.Proto, ir.PortSet, bool) {
+	noMatch := func() (string, ir.Addr, ir.Proto, ir.PortSet, bool) {
+		return "", ir.Addr{}, ir.ProtoAny, ir.PortSet{}, false
+	}
+
+	tokens := mergePortListFragments(splitRuleFields(text))
+	iface, tokens, ok := p.extractDnatIface(lineNo, tokens)
+	if !ok {
+		return noMatch()
+	}
+	proto, tokens, _, ok := p.extractProtoTokens(lineNo, tokens, ir.ProtoAny, false)
+	if !ok {
+		return noMatch()
+	}
+
+	src := ir.Addr{Any: true}
+	haveSrc := false
+	var ranges []ir.PortRange
+	for _, tok := range tokens {
+		if looksLikePortSet(tok) {
+			ports, ok := p.parsePorts(lineNo, tok)
+			if !ok {
+				return noMatch()
+			}
+			ranges = append(ranges, ports.Ranges...)
+			continue
+		}
+		addr, ok := p.parseSrcToken(lineNo, tok)
+		if !ok {
+			return noMatch()
+		}
+		if addr.Named != "" {
+			p.semanticErr(lineNo, "dnat 的源地址不支持命名集合引用（写具体网段或 *）")
+			return noMatch()
+		}
+		if haveSrc {
+			p.semanticErr(lineNo, "dnat 匹配部分只能写一个源地址（不支持按原目的地址匹配：%q）", tok)
+			return noMatch()
+		}
+		src, haveSrc = addr, true
+	}
+	if len(ranges) == 0 {
+		return iface, src, proto, ir.PortSet{}, true
+	}
+	return iface, src, proto, ir.PortSet{Ranges: ir.MergePortRanges(ranges)}, true
+}
+
+// parseDnatTarget 解析 -> 右侧的 NAT 目标：
+//
+//	443                → 本机 443（redirect to :443）
+//	8000-8100          → 本机端口范围（等长映射）
+//	10.0.0.5           → 改目的地址，保留原端口（dnat ip to 10.0.0.5）
+//	10.0.0.5:8080      → 改目的地址与端口（dnat ip to 10.0.0.5:8080）
+//	[2001:db8::5]:8443 → IPv6 目标地址与端口
+func (p *parser) parseDnatTarget(lineNo int, raw string) (ir.DnatTarget, bool) {
+	if raw == "" {
+		p.syntaxErr(lineNo, "dnat 目标为空")
+		return ir.DnatTarget{}, false
+	}
+	if strings.HasPrefix(raw, "[") {
+		return p.parseBracketDnatTarget(lineNo, raw)
+	}
+	if looksLikePortSet(raw) {
+		ports, ok := p.parseDnatTargetPorts(lineNo, raw)
+		if !ok {
+			return ir.DnatTarget{}, false
+		}
+		return ir.DnatTarget{Local: true, Ports: ports}, true
+	}
+	if strings.Count(raw, ":") == 1 {
+		idx := strings.IndexByte(raw, ':')
+		host, portText := raw[:idx], raw[idx+1:]
+		if isIPv4(host) {
+			addr, msg := parseAddr(host)
+			if msg != "" {
+				p.semanticErr(lineNo, "%s", msg)
+				return ir.DnatTarget{}, false
+			}
+			ports, ok := p.parseDnatTargetPorts(lineNo, portText)
+			if !ok {
+				return ir.DnatTarget{}, false
+			}
+			return ir.DnatTarget{Addr: addr, Ports: ports}, true
+		}
+	}
+	addr, msg := parseAddr(raw)
+	if msg != "" {
+		p.semanticErr(lineNo, "dnat 目标无法识别：%q（本机写端口 443；跨机写 10.0.0.5:8080 或 [IPv6]:8080）", raw)
+		return ir.DnatTarget{}, false
+	}
+	if addr.Any {
+		p.semanticErr(lineNo, "dnat 目标不能是 *（本机重定向写端口，如 to 443）")
+		return ir.DnatTarget{}, false
+	}
+	if strings.Contains(raw, "/") {
+		p.semanticErr(lineNo, "dnat 目标不能是网段（%q）", raw)
+		return ir.DnatTarget{}, false
+	}
+	return ir.DnatTarget{Addr: addr}, true
+}
+
+// parseBracketDnatTarget 解析 `[IPv6]` 或 `[IPv6]:端口` 形式的目标。
+func (p *parser) parseBracketDnatTarget(lineNo int, raw string) (ir.DnatTarget, bool) {
+	end := strings.IndexByte(raw, ']')
+	if end < 0 {
+		p.syntaxErr(lineNo, "IPv6 方括号未闭合")
+		return ir.DnatTarget{}, false
+	}
+	addr, msg := parseAddr(raw[1:end])
+	if msg != "" {
+		p.semanticErr(lineNo, "%s", msg)
+		return ir.DnatTarget{}, false
+	}
+	if addr.Family != ir.FamilyIPv6 {
+		p.semanticErr(lineNo, "方括号只能用于 IPv6 地址")
+		return ir.DnatTarget{}, false
+	}
+	rest := raw[end+1:]
+	if rest == "" {
+		return ir.DnatTarget{Addr: addr}, true
+	}
+	if !strings.HasPrefix(rest, ":") {
+		p.syntaxErr(lineNo, "方括号地址后只能跟 :端口")
+		return ir.DnatTarget{}, false
+	}
+	ports, ok := p.parseDnatTargetPorts(lineNo, rest[1:])
+	if !ok {
+		return ir.DnatTarget{}, false
+	}
+	return ir.DnatTarget{Addr: addr, Ports: ports}, true
+}
+
+// parseDnatTargetPorts 解析 NAT 目标端口：只允许一个端口或一个范围（端口映射必须一一对应）。
+func (p *parser) parseDnatTargetPorts(lineNo int, raw string) (ir.PortSet, bool) {
+	ports, ok := p.parsePorts(lineNo, raw)
+	if !ok {
+		return ir.PortSet{}, false
+	}
+	if len(ports.Ranges) != 1 {
+		p.semanticErr(lineNo, "dnat 目标端口只能是一个端口或一个范围（如 443 / 8000-8100）")
+		return ir.PortSet{}, false
+	}
+	return ports, true
+}
+
 // parseBlockShortRule 解析块内无箭头规则：src [proto] [log] [动作]，等价 src -> *://*:*。
 func (p *parser) parseBlockShortRule(lineNo int, rawLine, text string, verdict ir.Verdict) {
 	fields := splitRuleFields(text)
@@ -976,6 +1306,36 @@ func hasIfaceToken(tokens []string) bool {
 		}
 	}
 	return false
+}
+
+// extractDnatIface 取出 dnat 匹配部分里的 `iface <网卡名>` 组合。
+//
+// 动作块要求 iface 独立成行（D45），dnat 块需要 `iface eth0 udp 20000-50000 -> 443`
+// 这类组合，因此单独提取。iface 可出现在匹配部分任意位置，但只能出现一次。
+func (p *parser) extractDnatIface(lineNo int, tokens []string) (string, []string, bool) {
+	for i, tok := range tokens {
+		if !strings.EqualFold(tok, "iface") {
+			continue
+		}
+		if i+1 >= len(tokens) {
+			p.syntaxErr(lineNo, "iface 后面缺少网卡名")
+			return "", nil, false
+		}
+		name := tokens[i+1]
+		if !ifacePatternRe.MatchString(name) {
+			p.semanticErr(lineNo, "网卡名 %q 不合法（允许字母/数字/_.@-，可带尾缀 *，长度 1-15）", name)
+			return "", nil, false
+		}
+		rest := make([]string, 0, len(tokens)-2)
+		rest = append(rest, tokens[:i]...)
+		rest = append(rest, tokens[i+2:]...)
+		if hasIfaceToken(rest) {
+			p.syntaxErr(lineNo, "iface 只能出现一次")
+			return "", nil, false
+		}
+		return name, rest, true
+	}
+	return "", tokens, true
 }
 
 // mergePortListFragments 把被空白拆开的裸端口列表片段拼回去（80, 443 → 80,443）。

@@ -16,15 +16,17 @@ var Version = "1.7.0"
 
 // Options 是编译与产物头所需的全部参数。
 type Options struct {
-	Table     string
-	Chain     string
-	Hook      string
-	Priority  string
-	LogPrefix string
-	Version   string
-	Source    string
-	Stamp     bool
-	Now       time.Time
+	Table    string
+	Chain    string
+	Hook     string
+	Priority string
+	// PrioritySet 报告 Priority 是否由命令行显式指定；true 时覆盖 ACL 的 priority 指令。
+	PrioritySet bool
+	LogPrefix   string
+	Version     string
+	Source      string
+	Stamp       bool
+	Now         time.Time
 }
 
 // Compile 把 DSL 文本编译为完整 nftables ruleset。
@@ -52,7 +54,7 @@ func Compile(src []byte, opts Options) ([]byte, []errs.Warning, error) {
 		Table:            opts.Table,
 		Chain:            opts.Chain,
 		Hook:             opts.Hook,
-		Priority:         opts.Priority,
+		Priority:         file.ResolvePriority(opts.Priority, opts.PrioritySet),
 		LogPrefix:        opts.LogPrefix,
 		Version:          opts.Version,
 		Source:           opts.Source,

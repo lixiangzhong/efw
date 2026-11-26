@@ -20,7 +20,7 @@ func TestNft08Rendering(t *testing.T) {
 		t.Fatalf("编译失败: %v", err)
 	}
 	text := string(out)
-	if !strings.Contains(text, "priority 0;") {
+	if !strings.Contains(text, "priority -99;") {
 		t.Fatalf("应使用数字 priority:\n%s", text)
 	}
 	if strings.Contains(text, "th dport") {
@@ -42,6 +42,21 @@ func TestMasqueradeRejected(t *testing.T) {
 		t.Fatal("应拒绝 masquerade")
 	}
 	if !strings.Contains(err.Error(), "E102") || !strings.Contains(err.Error(), "masquerade") {
+		t.Fatalf("错误码/信息不符: %v", err)
+	}
+}
+
+// TestDnatRejected nft 0.8 不支持 inet 族 NAT，dnat/redirect 直接报 E102。
+func TestDnatRejected(t *testing.T) {
+	src, err := os.ReadFile(filepath.Join(goldenDir, "39_dnat.acl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _, err = legacy.Compile(src, testOptions("testdata/golden/39_dnat.acl"))
+	if err == nil {
+		t.Fatal("应拒绝 dnat")
+	}
+	if !strings.Contains(err.Error(), "E102") || !strings.Contains(err.Error(), "dnat") {
 		t.Fatalf("错误码/信息不符: %v", err)
 	}
 }

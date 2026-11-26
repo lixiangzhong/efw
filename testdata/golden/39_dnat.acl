@@ -1,0 +1,12 @@
+# 入站目的 NAT：UDP 端口汇聚到本机 443 + 跨机 DNAT
+dnat {
+    iface eth0 udp 20000-50000 -> 443
+    iface eth0 tcp 8080 -> 10.0.0.5:8080
+    * tcp 8443 -> [2001:db8::5]:8443
+}
+
+accept {
+    udp * -> 443
+}
+
+drop

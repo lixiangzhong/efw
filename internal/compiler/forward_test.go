@@ -23,7 +23,7 @@ func TestForwardChain(t *testing.T) {
 	for _, want := range []string{
 		"chain input {",
 		"chain forward {",
-		"type filter hook forward priority -10; policy accept;",
+		"type filter hook forward priority -99; policy accept;",
 		"ct status dnat ip saddr 1.1.1.0/24 meta l4proto tcp ct original proto-dst 8080 accept",
 		"ct status dnat ip saddr 1.1.1.0/24 meta l4proto udp ct original proto-dst 8080 accept",
 		"ct status dnat drop",

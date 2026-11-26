@@ -26,6 +26,12 @@ func Compile(src []byte, opts Options) ([]byte, []errs.Warning, error) {
 		return nil, nil, errs.Errors{errs.NewError(opts.Source, first.Line, 0, errs.CategorySemantic, errs.CodeSemantic,
 			"nft 0.8 不支持 masquerade：inet 族 NAT 需要 nft ≥1.0 与内核 ≥5.2")}
 	}
+	// dnat/redirect 同样需要 inet 族 NAT，0.8 直接拒绝。
+	if len(file.Dnats) > 0 {
+		first := file.Dnats[0]
+		return nil, nil, errs.Errors{errs.NewError(opts.Source, first.Line, 0, errs.CategorySemantic, errs.CodeSemantic,
+			"nft 0.8 不支持 dnat/redirect：inet 族 NAT 需要 nft ≥1.0 与内核 ≥5.2")}
+	}
 
 	unreachable := make(map[int]bool)
 	for _, warn := range warns {
@@ -39,7 +45,8 @@ func Compile(src []byte, opts Options) ([]byte, []errs.Warning, error) {
 		Table:            opts.Table,
 		Chain:            opts.Chain,
 		Hook:             opts.Hook,
-		Priority:         opts.Priority,
+		Priority:         file.ResolvePriority(opts.Priority, opts.PrioritySet),
+		PrioritySet:      opts.PrioritySet,
 		LogPrefix:        opts.LogPrefix,
 		Version:          opts.Version,
 		Source:           opts.Source,
